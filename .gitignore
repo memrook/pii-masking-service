@@ -1,0 +1,53 @@
+# Env
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+*.pyo
+*.pyd
+*.so
+pip-log.txt
+pip-delete-this-directory.txt
+.Python
+
+# spaCy / natasha model caches
+.natasha/
+.navec/
+
+# IDE
+.idea/
+.vscode/
+.claude/
+*.swp
+*.swo
+*~
+
+# Docker
+*.log
+
+# Docs / planning
+docs/
+docs/plans/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# MyPy
+.mypy_cache/
+.dmypy.json
