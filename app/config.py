@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     token_passport: str = "PASSPORT"
     token_snils: str = "SNILS"
     token_address: str = "ADDRESS"
+    token_card: str = "CARD"
+    token_vin: str = "VIN"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

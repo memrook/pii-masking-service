@@ -20,8 +20,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Скачиваем spaCy модели для NER
-RUN python -m spacy download ru_core_news_lg && \
-    python -m spacy download en_core_web_lg
+RUN python -m spacy download ru_core_news_md && \
+    python -m spacy download en_core_web_md
 
 # Прогреваем Natasha-эмбеддинги (~220MB при первом вызове)
 RUN python -c "from natasha import NewsEmbedding, NewsNERTagger; NewsNERTagger(NewsEmbedding())"

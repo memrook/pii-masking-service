@@ -321,6 +321,8 @@ const ENTITY_COLORS = {
   PASSPORT: '#e05c5c',
   SNILS:    '#5ce0c7',
   ADDRESS:  '#9aa8e0',
+  CARD:     '#e05c8a',
+  VIN:      '#7ab87a',
 };
 
 // ── State ────────────────────────────────────────────────────
@@ -428,7 +430,7 @@ function highlightTokens(text) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
   return safe.replace(
-    /\b(PERSON|PHONE|INN|OGRN|ORG|EMAIL|PASSPORT|SNILS|ADDRESS)_(\d+)\b/g,
+    /\b(PERSON|PHONE|INN|OGRN|ORG|EMAIL|PASSPORT|SNILS|ADDRESS|CARD|VIN)_(\d+)\b/g,
     (_, type, num) => {
       const c = ENTITY_COLORS[type] || '#9a9bb0';
       return `<span class="token" style="color:${c};background:${c}1c;border-color:${c}55">${type}<span class="token-num">_${num}</span></span>`;

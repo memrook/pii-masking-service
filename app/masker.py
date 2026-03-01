@@ -11,6 +11,8 @@
 #   PASSPORT  — серия и номер паспорта РФ
 #   SNILS     — СНИЛС
 #   ADDRESS   — адреса РФ (Presidio + regex)
+#   CARD      — номера банковских карт (regex + алгоритм Луна)
+#   VIN       — идентификационный номер ТС (ISO 3779)
 # ============================================================
 
 import re
@@ -24,6 +26,22 @@ from presidio_anonymizer import AnonymizerEngine
 from .config import settings
 
 logger = logging.getLogger(__name__)
+
+
+# ----------------------------------------------------------
+# Вспомогательные функции
+# ----------------------------------------------------------
+
+def _luhn_check(number: str) -> bool:
+    """Проверка номера карты по алгоритму Луна."""
+    digits = [int(d) for d in number]
+    digits.reverse()
+    total = sum(
+        d - 9 if d > 9 else d
+        for i, d in enumerate(digits)
+        for d in [d * 2 if i % 2 == 1 else d]
+    )
+    return total % 10 == 0
 
 
 # ----------------------------------------------------------
@@ -150,6 +168,51 @@ def _make_address_recognizer() -> PatternRecognizer:
     )
 
 
+def _make_card_recognizer(language: str = "ru") -> PatternRecognizer:
+    """Банковские карты: 13–19 цифр с проверкой алгоритма Луна.
+
+    Покрываемые форматы:
+      4111 1111 1111 1111   — пробелы (Visa/Mastercard/Мир)
+      4111-1111-1111-1111   — дефисы
+      4111111111111111      — слитно
+      3714 496353 98431     — Amex (15 цифр, 4-6-5)
+    """
+    class _CardRecognizer(PatternRecognizer):
+        def validate_result(self, pattern_text: str):
+            digits = re.sub(r"\D", "", pattern_text)
+            if not (13 <= len(digits) <= 19):
+                return False
+            return _luhn_check(digits)
+
+    return _CardRecognizer(
+        supported_entity="CARD",
+        supported_language=language,
+        patterns=[
+            Pattern("CARD_SPACED",  r"\b\d{4}[\s\-]\d{4}[\s\-]\d{4}[\s\-]\d{4}\b", 0.85),
+            Pattern("CARD_AMEX",    r"\b\d{4}[\s\-]\d{6}[\s\-]\d{5}\b",             0.85),
+            Pattern("CARD_PLAIN",   r"\b\d{13,19}\b",                                0.50),
+        ],
+        context=["карта", "карточка", "номер карты", "card", "visa",
+                 "mastercard", "мир", "maestro", "оплата", "платёж"],
+    )
+
+
+def _make_vin_recognizer(language: str = "ru") -> PatternRecognizer:
+    """VIN транспортного средства по ISO 3779: 17 символов [A-HJ-NPR-Z0-9].
+
+    Буквы I, O, Q исключены стандартом во избежание путаницы с цифрами.
+    """
+    return PatternRecognizer(
+        supported_entity="VIN",
+        supported_language=language,
+        patterns=[
+            Pattern("VIN", r"\b[A-HJ-NPR-Z0-9]{17}\b", 0.70),
+        ],
+        context=["vin", "вин", "кузов", "птс", "стс", "свидетельство",
+                 "транспортное средство", "идентификационный номер"],
+    )
+
+
 # ----------------------------------------------------------
 # Инициализация Presidio
 # ----------------------------------------------------------
@@ -159,8 +222,8 @@ def _build_presidio_analyzer() -> AnalyzerEngine:
     configuration = {
         "nlp_engine_name": "spacy",
         "models": [
-            {"lang_code": "ru", "model_name": "ru_core_news_lg"},
-            {"lang_code": "en", "model_name": "en_core_web_lg"},
+            {"lang_code": "ru", "model_name": "ru_core_news_md"},
+            {"lang_code": "en", "model_name": "en_core_web_md"},
         ],
     }
     provider = NlpEngineProvider(nlp_configuration=configuration)
@@ -179,6 +242,10 @@ def _build_presidio_analyzer() -> AnalyzerEngine:
         _make_snils_recognizer(),
         _make_ru_phone_recognizer(),
         _make_address_recognizer(),
+        _make_card_recognizer("ru"),
+        _make_card_recognizer("en"),
+        _make_vin_recognizer("ru"),
+        _make_vin_recognizer("en"),
     ]:
         analyzer.registry.add_recognizer(recognizer)
 
@@ -212,17 +279,20 @@ def is_models_loaded() -> bool:
 # Карта: тип сущности → токен-префикс
 # ----------------------------------------------------------
 _ENTITY_TOKEN_MAP = {
-    "PERSON":       settings.token_person,
-    "PER":          settings.token_person,    # natasha использует PER
-    "INN_RU":       settings.token_inn,
-    "OGRN_RU":      settings.token_ogrn,
-    "ORG":          settings.token_org,
+    "PERSON":        settings.token_person,
+    "PER":           settings.token_person,    # natasha использует PER
+    "INN_RU":        settings.token_inn,
+    "OGRN_RU":       settings.token_ogrn,
+    "ORG":           settings.token_org,
     "EMAIL_ADDRESS": settings.token_email,
-    "PHONE_NUMBER": settings.token_phone,
-    "PHONE_RU":     settings.token_phone,
-    "PASSPORT_RU":  settings.token_passport,
-    "SNILS_RU":     settings.token_snils,
-    "ADDRESS_RU":   settings.token_address,
+    "PHONE_NUMBER":  settings.token_phone,
+    "PHONE_RU":      settings.token_phone,
+    "PASSPORT_RU":   settings.token_passport,
+    "SNILS_RU":      settings.token_snils,
+    "ADDRESS_RU":    settings.token_address,
+    "CARD":          settings.token_card,
+    "CREDIT_CARD":   settings.token_card,      # Presidio built-in (EN)
+    "VIN":           settings.token_vin,
 }
 
 
@@ -271,7 +341,9 @@ def mask_text(text: str, session_id: str, language: str = "ru") -> tuple[str, di
         entities=[
             "INN_RU", "OGRN_RU", "PHONE_NUMBER", "PHONE_RU",
             "EMAIL_ADDRESS", "PASSPORT_RU", "SNILS_RU", "ADDRESS_RU",
-            "PERSON",      # Presidio тоже умеет находить имена (en)
+            "PERSON",        # Presidio тоже умеет находить имена (en)
+            "CARD", "CREDIT_CARD",
+            "VIN",
         ],
     )
 
