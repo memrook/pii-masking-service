@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     api_port: int = 6111
     api_workers: int = 2
     api_key: str = ""                # если пусто — авторизация отключена
+    api_root_path: str = ""          # subpath при размещении за reverse-proxy, напр. /ai/masking
 
     # Логирование
     log_level: str = "INFO"

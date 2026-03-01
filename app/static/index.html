@@ -306,6 +306,10 @@
 </div>
 
 <script>
+// ── Base URL (работает и на / и на /ai/masking/) ─────────────
+// Страница отдаётся из /ui/, API — на уровень выше
+const BASE = window.location.pathname.replace(/\/ui(\/.*)?$/, '/');
+
 // ── Config ───────────────────────────────────────────────────
 const ENTITY_COLORS = {
   PERSON:   '#6c63ff',
@@ -447,7 +451,7 @@ function renderChips(types) {
 // ── Health ───────────────────────────────────────────────────
 async function checkHealth() {
   try {
-    const r = await fetch('/health', { headers: headers() });
+    const r = await fetch(BASE + 'health', { headers: headers() });
     const d = await r.json();
     el.dot.className = 'health-dot ' + (d.status === 'ok' ? 'ok' : d.status === 'degraded' ? 'degraded' : 'error');
     return d.models_loaded;
@@ -475,7 +479,7 @@ async function pollReady() {
 
 async function checkAuth() {
   try {
-    const r = await fetch('/stats', { headers: headers() });
+    const r = await fetch(BASE + 'stats', { headers: headers() });
     if (r.status === 403) {
       el.apiRow.classList.add('visible');
       setStatus('Требуется авторизация — введите API-ключ', 'err');
@@ -490,7 +494,7 @@ async function doMask() {
   const lang = $('lang-sel').value;
   setLoading(true); setBtns(true);
   try {
-    const r = await fetch('/mask', {
+    const r = await fetch(BASE + 'mask', {
       method: 'POST', headers: headers(),
       body: JSON.stringify({ text, session_id: sessionId, language: lang }),
     });
@@ -516,7 +520,7 @@ async function doUnmask() {
   if (!text) { setStatus('Поле результата пустое', 'err'); return; }
   setLoading(true); setBtns(true);
   try {
-    const r = await fetch('/unmask', {
+    const r = await fetch(BASE + 'unmask', {
       method: 'POST', headers: headers(),
       body: JSON.stringify({ text: outputRaw, session_id: sessionId }),
     });
@@ -551,7 +555,7 @@ async function copyOutput() {
 // ── Reset ────────────────────────────────────────────────────
 async function resetSession() {
   try {
-    await fetch(`/session/${sessionId}`, { method: 'DELETE', headers: headers() });
+    await fetch(`${BASE}session/${sessionId}`, { method: 'DELETE', headers: headers() });
   } catch { /* ignore */ }
   sessionId = uuid();
   localStorage.setItem('pii_session_id', sessionId);
