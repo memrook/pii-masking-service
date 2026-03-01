@@ -4,8 +4,8 @@
 # Самостоятельный запуск (без других проектов):
 #   docker compose up -d
 #
-# Сервис будет доступен на http://localhost:8000
-# Swagger UI: http://localhost:8000/docs
+# Сервис будет доступен на http://localhost:6111
+# Swagger UI: http://localhost:6111/docs
 # ============================================================
 
 services:
