@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PII Masking Service</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-primary:    #f0f2f7;
+      --bg-secondary:  #ffffff;
+      --bg-tertiary:   #e8eaf2;
+      --accent:        #5b52e8;
+      --text-primary:  #1c1f33;
+      --text-secondary:#707494;
+      --success:       #2d9e5f;
+      --warning:       #b87700;
+      --error:         #c43d3d;
+      --border:        #d4d7ea;
+      --font-ui:       'Roboto', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      --font-mono:     'Courier New', Consolas, monospace;
+      --radius:        6px;
+      --t:             0.15s ease;
+    }
+    *{box-sizing:border-box;margin:0;padding:0}
+
+    body {
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      font-family: var(--font-ui);
+      font-size: 14px;
+      min-height: 100vh;
+      background-image:
+        linear-gradient(rgba(91,82,232,.04) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(91,82,232,.04) 1px, transparent 1px);
+      background-size: 32px 32px;
+    }
+
+    /* ── Loading overlay ─────────────────────────────────── */
+    #loading-overlay {
+      position:fixed;inset:0;
+      background:var(--bg-primary);
+      display:flex;flex-direction:column;align-items:center;justify-content:center;
+      z-index:1000;gap:14px;
+      transition:opacity .4s ease;
+    }
+    #loading-overlay.hidden{opacity:0;pointer-events:none}
+    .ov-title{font-family:var(--font-ui);font-size:20px;letter-spacing:.25em;color:var(--accent)}
+    .ov-sub{font-family:var(--font-ui);font-size:12px;letter-spacing:.1em;color:var(--text-secondary);animation:blink 1.2s step-end infinite}
+
+    /* ── App shell ───────────────────────────────────────── */
+    .app{max-width:1240px;margin:0 auto;padding:14px;display:flex;flex-direction:column;gap:10px}
+
+    /* ── Header ──────────────────────────────────────────── */
+    header{
+      display:flex;align-items:center;justify-content:space-between;
+      padding:10px 16px;
+      background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius);
+      box-shadow:0 1px 3px rgba(0,0,0,.06);
+    }
+    .hdr-left{display:flex;align-items:center;gap:10px}
+    .logo{font-size:15px;font-weight:500;letter-spacing:.04em}
+    .logo em{color:var(--accent);font-style:normal}
+
+    .health-dot{width:8px;height:8px;border-radius:50%;background:var(--text-secondary);flex-shrink:0}
+    .health-dot.ok      {background:var(--success);animation:pulse-green 2s ease-in-out infinite}
+    .health-dot.degraded{background:var(--warning);animation:pulse-warn  1.5s ease-in-out infinite}
+    .health-dot.error   {background:var(--error);  animation:pulse-err   1s ease-in-out infinite}
+
+    @keyframes pulse-green{0%,100%{box-shadow:0 0 0 0 rgba(45,158,95,.5)} 50%{box-shadow:0 0 0 5px rgba(45,158,95,0)}}
+    @keyframes pulse-warn {0%,100%{box-shadow:0 0 0 0 rgba(184,119,0,.5)} 50%{box-shadow:0 0 0 5px rgba(184,119,0,0)}}
+    @keyframes pulse-err  {0%,100%{box-shadow:0 0 0 0 rgba(196,61,61,.5)} 50%{box-shadow:0 0 0 5px rgba(196,61,61,0)}}
+
+    .api-key-row{display:none;align-items:center;gap:8px}
+    .api-key-row.visible{display:flex}
+    .api-key-row label{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--text-secondary)}
+
+    /* ── Banner ──────────────────────────────────────────── */
+    .models-banner{
+      display:none;align-items:center;gap:10px;
+      padding:9px 16px;
+      background:rgba(184,119,0,.07);border:1px solid rgba(184,119,0,.28);border-radius:var(--radius);
+      color:var(--warning);font-size:11px;letter-spacing:.04em;
+    }
+    .models-banner.visible{display:flex}
+
+    /* ── Session bar ─────────────────────────────────────── */
+    .session-bar{
+      display:flex;align-items:center;justify-content:space-between;gap:12px;
+      padding:9px 16px;
+      background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius);
+      box-shadow:0 1px 3px rgba(0,0,0,.06);
+    }
+    .sess-left{display:flex;align-items:center;gap:9px;min-width:0}
+    .sess-label{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--text-secondary);flex-shrink:0}
+    .sess-id{font-family:var(--font-mono);font-size:12px;color:var(--accent);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .ttl{font-size:12px;color:var(--text-secondary);white-space:nowrap;flex-shrink:0}
+    .ttl.active{color:var(--warning)}
+    .ttl.expiring{color:var(--error);animation:blink 1s step-end infinite}
+
+    /* ── Workspace ───────────────────────────────────────── */
+    .workspace{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+    @media(max-width:768px){.workspace{grid-template-columns:1fr}}
+
+    .panel{
+      display:flex;flex-direction:column;gap:8px;
+      padding:12px;
+      background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius);
+      box-shadow:0 1px 3px rgba(0,0,0,.06);
+    }
+    .panel-hdr{display:flex;align-items:center;justify-content:space-between}
+    .panel-label{font-size:11px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;color:var(--text-secondary)}
+
+    .ta-wrap{position:relative}
+    textarea{
+      width:100%;min-height:220px;resize:vertical;
+      background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);
+      color:var(--text-primary);font-family:var(--font-mono);font-size:13px;line-height:1.65;
+      padding:10px 12px;outline:none;
+      transition:border-color var(--t);
+    }
+    textarea:focus{border-color:var(--accent)}
+    textarea::placeholder{color:var(--text-secondary);opacity:.55}
+    @keyframes scan{0%{opacity:.6;background:var(--bg-tertiary)}50%{background:rgba(91,82,232,.07)}100%{opacity:1;background:var(--bg-tertiary)}}
+    textarea.scanning,.output-display.scanning{animation:scan .45s ease}
+
+    /* ── Output display (div вместо readonly textarea) ───── */
+    .output-display{
+      width:100%;min-height:220px;max-height:480px;overflow-y:auto;
+      background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);
+      color:var(--text-primary);font-family:var(--font-mono);font-size:13px;line-height:1.65;
+      padding:10px 12px;
+      white-space:pre-wrap;word-break:break-word;
+      cursor:default;opacity:.9;
+      transition:border-color var(--t),background var(--t);
+    }
+    .output-display:empty::before{
+      content:attr(data-placeholder);
+      color:var(--text-secondary);opacity:.55;pointer-events:none;
+    }
+    /* ── Токены ──────────────────────────────────────────── */
+    .token{
+      display:inline;
+      border:1px solid;border-radius:3px;
+      padding:1px 5px;font-weight:700;
+      font-size:.92em;
+      line-height:1.3;
+    }
+    .token-num{font-weight:400;opacity:.6}
+
+    .panel-foot{display:flex;align-items:center;gap:7px}
+
+    /* ── Buttons ─────────────────────────────────────────── */
+    button{
+      font-family:var(--font-ui);font-size:12px;font-weight:500;letter-spacing:.04em;text-transform:uppercase;
+      border:1px solid var(--border);border-radius:var(--radius);
+      background:var(--bg-tertiary);color:var(--text-secondary);
+      padding:6px 13px;cursor:pointer;
+      transition:all var(--t);
+    }
+    button:hover:not(:disabled){border-color:var(--accent);color:var(--text-primary)}
+    button:disabled{opacity:.35;cursor:not-allowed}
+    button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+    button.primary:hover:not(:disabled){background:#6e66f0;border-color:#6e66f0}
+    button.danger{border-color:var(--error);color:var(--error)}
+    button.danger:hover:not(:disabled){background:rgba(196,61,61,.08)}
+    button.ok{border-color:var(--success);color:var(--success)}
+    button.ok:hover:not(:disabled){background:rgba(45,158,95,.08)}
+
+    select,input[type="password"],input[type="text"]{
+      font-family:var(--font-ui);font-size:12px;letter-spacing:.03em;
+      background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);
+      color:var(--text-secondary);padding:6px 10px;outline:none;
+      transition:border-color var(--t);text-transform:uppercase;
+    }
+    select:focus,select:hover,input:focus,input:hover{border-color:var(--accent);color:var(--text-primary)}
+
+    /* ── Entities ─────────────────────────────────────────── */
+    .entities-row{
+      display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+      padding:9px 16px;min-height:42px;
+      background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius);
+      box-shadow:0 1px 3px rgba(0,0,0,.06);
+    }
+    .ent-label{font-size:11px;font-weight:500;letter-spacing:.06em;text-transform:uppercase;color:var(--text-secondary);white-space:nowrap;flex-shrink:0}
+    .chips{display:flex;flex-wrap:wrap;gap:5px}
+    .chip{
+      font-family:var(--font-ui);font-size:11px;letter-spacing:.04em;text-transform:uppercase;font-weight:700;
+      padding:3px 8px;border-radius:3px;border:1px solid currentColor;
+      animation:chipIn .2s ease;
+    }
+    @keyframes chipIn{from{opacity:0;transform:scale(.85)}to{opacity:1;transform:scale(1)}}
+
+    /* ── Status bar ───────────────────────────────────────── */
+    .status-bar{
+      display:flex;align-items:center;gap:9px;
+      padding:8px 16px;min-height:36px;
+      background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius);
+      box-shadow:0 1px 3px rgba(0,0,0,.06);
+    }
+    .status-txt{font-size:12px;color:var(--text-secondary)}
+    .status-txt.err{color:var(--error)}
+    .status-txt.ok{color:var(--success)}
+
+    .spinner{
+      width:13px;height:13px;border-radius:50%;
+      border:2px solid var(--border);border-top-color:var(--accent);
+      animation:spin .75s linear infinite;flex-shrink:0;display:none;
+    }
+    .spinner.on{display:block}
+
+    @keyframes spin{to{transform:rotate(360deg)}}
+    @keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
+  </style>
+</head>
+<body>
+
+<!-- Loading overlay -->
+<div id="loading-overlay">
+  <div class="ov-title">PII MASKING</div>
+  <div class="ov-sub">Инициализация...</div>
+</div>
+
+<div class="app">
+
+  <!-- Header -->
+  <header>
+    <div class="hdr-left">
+      <div class="health-dot" id="health-dot"></div>
+      <div class="logo">PII <em>Masking</em> Service</div>
+    </div>
+    <div class="api-key-row" id="api-key-row">
+      <label for="api-key-input">API-ключ</label>
+      <input type="password" id="api-key-input" placeholder="••••••••••••••••" style="width:190px">
+      <button onclick="saveApiKey()">Сохранить</button>
+    </div>
+  </header>
+
+  <!-- Models loading banner -->
+  <div class="models-banner" id="models-banner">
+    <div class="spinner on" style="border-top-color:var(--warning)"></div>
+    <span>Модели NLP загружаются — пожалуйста, подождите...</span>
+  </div>
+
+  <!-- Session bar -->
+  <div class="session-bar">
+    <div class="sess-left">
+      <span class="sess-label">Сессия</span>
+      <span class="sess-id" id="sess-id">—</span>
+      <button class="danger" id="btn-reset" onclick="resetSession()">Сбросить</button>
+    </div>
+    <div class="ttl" id="ttl">Время жизни: —</div>
+  </div>
+
+  <!-- Workspace -->
+  <div class="workspace">
+
+    <!-- Input panel -->
+    <div class="panel">
+      <div class="panel-hdr">
+        <span class="panel-label">Входной текст</span>
+      </div>
+      <div class="ta-wrap">
+        <textarea id="input-ta" placeholder="Введите текст с персональными данными..."></textarea>
+      </div>
+      <div class="panel-foot">
+        <select id="lang-sel">
+          <option value="ru">RU</option>
+          <option value="en">EN</option>
+        </select>
+        <button class="primary" id="btn-mask" onclick="doMask()">Маскировать →</button>
+      </div>
+    </div>
+
+    <!-- Output panel -->
+    <div class="panel">
+      <div class="panel-hdr">
+        <span class="panel-label">Результат</span>
+      </div>
+      <div class="ta-wrap">
+        <div id="output-ta" class="output-display" data-placeholder="Маскированный текст появится здесь..."></div>
+      </div>
+      <div class="panel-foot">
+        <button class="ok" id="btn-copy" onclick="copyOutput()">Копировать</button>
+        <button id="btn-unmask" onclick="doUnmask()">← Восстановить</button>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Entities -->
+  <div class="entities-row">
+    <span class="ent-label">Сущности</span>
+    <div class="chips" id="chips">
+      <span style="color:var(--text-secondary);font-size:11px;font-style:italic">не найдено</span>
+    </div>
+  </div>
+
+  <!-- Status bar -->
+  <div class="status-bar">
+    <div class="spinner" id="spinner"></div>
+    <div class="status-txt" id="status">Готово</div>
+  </div>
+
+</div>
+
+<script>
+// ── Config ───────────────────────────────────────────────────
+const ENTITY_COLORS = {
+  PERSON:   '#6c63ff',
+  PHONE:    '#4caf7d',
+  INN:      '#f0a500',
+  OGRN:     '#e0915c',
+  ORG:      '#5cb8e0',
+  EMAIL:    '#c75ce0',
+  PASSPORT: '#e05c5c',
+  SNILS:    '#5ce0c7',
+  ADDRESS:  '#9aa8e0',
+};
+
+// ── State ────────────────────────────────────────────────────
+let sessionId = '';
+let apiKey    = '';
+let ttlTimer  = null;
+let ttlLeft   = 0;
+let modelsOk  = false;
+let outputRaw = '';  // plain text в поле результата
+
+// ── Helpers ──────────────────────────────────────────────────
+const $  = id => document.getElementById(id);
+const el = {
+  overlay:  $('loading-overlay'),
+  dot:      $('health-dot'),
+  banner:   $('models-banner'),
+  sessId:   $('sess-id'),
+  ttl:      $('ttl'),
+  inputTa:  $('input-ta'),
+  outputTa: $('output-ta'),
+  chips:    $('chips'),
+  spinner:  $('spinner'),
+  status:   $('status'),
+  apiRow:   $('api-key-row'),
+  apiInput: $('api-key-input'),
+};
+
+function uuid() {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = Math.random() * 16 | 0;
+    return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+  });
+}
+
+function headers() {
+  const h = { 'Content-Type': 'application/json' };
+  if (apiKey) h['X-API-Key'] = apiKey;
+  return h;
+}
+
+function setStatus(msg, type = '') {
+  el.status.textContent = msg;
+  el.status.className = 'status-txt' + (type ? ' ' + type : '');
+}
+
+function setLoading(on) {
+  el.spinner.className = 'spinner' + (on ? ' on' : '');
+  if (on) setStatus('Обработка...');
+}
+
+const ACTION_BTNS = ['btn-mask','btn-unmask','btn-copy','btn-reset'];
+function setBtns(disabled) {
+  ACTION_BTNS.forEach(id => { $(id).disabled = disabled; });
+}
+
+// ── Session ──────────────────────────────────────────────────
+function initSession() {
+  sessionId = localStorage.getItem('pii_session_id') || uuid();
+  localStorage.setItem('pii_session_id', sessionId);
+  el.sessId.textContent = sessionId;
+}
+
+function initApiKey() {
+  apiKey = localStorage.getItem('pii_api_key') || '';
+  if (apiKey) el.apiInput.value = apiKey;
+}
+
+function saveApiKey() {
+  apiKey = el.apiInput.value.trim();
+  localStorage.setItem('pii_api_key', apiKey);
+  setStatus('API-ключ сохранён', 'ok');
+}
+
+// ── TTL ──────────────────────────────────────────────────────
+function startTTL(secs) {
+  clearInterval(ttlTimer);
+  ttlLeft = secs;
+  tick();
+  ttlTimer = setInterval(tick, 1000);
+}
+function tick() {
+  if (ttlLeft <= 0) {
+    clearInterval(ttlTimer);
+    el.ttl.textContent = 'Время жизни: истекло';
+    el.ttl.className = 'ttl expiring';
+    return;
+  }
+  const m = Math.floor(ttlLeft / 60), s = ttlLeft % 60;
+  el.ttl.textContent = `Время жизни: ${m}м ${String(s).padStart(2,'0')}с`;
+  el.ttl.className = 'ttl' + (ttlLeft > 60 ? ' active' : ' expiring');
+  ttlLeft--;
+}
+function stopTTL() {
+  clearInterval(ttlTimer);
+  el.ttl.textContent = 'Время жизни: —';
+  el.ttl.className = 'ttl';
+}
+
+// ── Token highlighting ────────────────────────────────────────
+function highlightTokens(text) {
+  if (!text) return '';
+  const safe = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  return safe.replace(
+    /\b(PERSON|PHONE|INN|OGRN|ORG|EMAIL|PASSPORT|SNILS|ADDRESS)_(\d+)\b/g,
+    (_, type, num) => {
+      const c = ENTITY_COLORS[type] || '#9a9bb0';
+      return `<span class="token" style="color:${c};background:${c}1c;border-color:${c}55">${type}<span class="token-num">_${num}</span></span>`;
+    }
+  );
+}
+
+// ── Entities ─────────────────────────────────────────────────
+function renderChips(types) {
+  if (!types || !types.length) {
+    el.chips.innerHTML = '<span style="color:var(--text-secondary);font-size:11px;font-style:italic">не найдено</span>';
+    return;
+  }
+  el.chips.innerHTML = types.map(t => {
+    const c = ENTITY_COLORS[t] || '#9a9bb0';
+    return `<span class="chip" style="color:${c};border-color:${c}40;background:${c}18">${t}</span>`;
+  }).join('');
+}
+
+// ── Health ───────────────────────────────────────────────────
+async function checkHealth() {
+  try {
+    const r = await fetch('/health', { headers: headers() });
+    const d = await r.json();
+    el.dot.className = 'health-dot ' + (d.status === 'ok' ? 'ok' : d.status === 'degraded' ? 'degraded' : 'error');
+    return d.models_loaded;
+  } catch {
+    el.dot.className = 'health-dot error';
+    return false;
+  }
+}
+
+async function pollReady() {
+  const loaded = await checkHealth();
+  el.overlay.classList.add('hidden');
+  if (loaded) {
+    modelsOk = true;
+    el.banner.classList.remove('visible');
+    setBtns(false);
+    await checkAuth();
+    setInterval(checkHealth, 30000);
+  } else {
+    el.banner.classList.add('visible');
+    setBtns(true);
+    setTimeout(pollReady, 3000);
+  }
+}
+
+async function checkAuth() {
+  try {
+    const r = await fetch('/stats', { headers: headers() });
+    if (r.status === 403) {
+      el.apiRow.classList.add('visible');
+      setStatus('Требуется авторизация — введите API-ключ', 'err');
+    }
+  } catch { /* ignore */ }
+}
+
+// ── Mask ─────────────────────────────────────────────────────
+async function doMask() {
+  const text = el.inputTa.value.trim();
+  if (!text) { setStatus('Введите текст для маскирования', 'err'); return; }
+  const lang = $('lang-sel').value;
+  setLoading(true); setBtns(true);
+  try {
+    const r = await fetch('/mask', {
+      method: 'POST', headers: headers(),
+      body: JSON.stringify({ text, session_id: sessionId, language: lang }),
+    });
+    if (!r.ok) { const e = await r.json(); throw new Error(e.detail || `HTTP ${r.status}`); }
+    const d = await r.json();
+    outputRaw = d.masked_text;
+    el.outputTa.innerHTML = highlightTokens(d.masked_text);
+    el.outputTa.classList.add('scanning');
+    setTimeout(() => el.outputTa.classList.remove('scanning'), 450);
+    renderChips(d.entities_found);
+    startTTL(300);
+    setStatus(`Маскировано — найдено типов сущностей: ${d.entities_found?.length || 0}`, 'ok');
+  } catch (e) {
+    setStatus(`Ошибка: ${e.message}`, 'err');
+  } finally {
+    setLoading(false); setBtns(false);
+  }
+}
+
+// ── Unmask ───────────────────────────────────────────────────
+async function doUnmask() {
+  const text = outputRaw.trim();
+  if (!text) { setStatus('Поле результата пустое', 'err'); return; }
+  setLoading(true); setBtns(true);
+  try {
+    const r = await fetch('/unmask', {
+      method: 'POST', headers: headers(),
+      body: JSON.stringify({ text: outputRaw, session_id: sessionId }),
+    });
+    if (!r.ok) { const e = await r.json(); throw new Error(e.detail || `HTTP ${r.status}`); }
+    const d = await r.json();
+    el.inputTa.value = d.unmasked_text;
+    setStatus(`Восстановлено — заменено токенов: ${d.tokens_replaced}`, 'ok');
+  } catch (e) {
+    setStatus(`Ошибка: ${e.message}`, 'err');
+  } finally {
+    setLoading(false); setBtns(false);
+  }
+}
+
+// ── Copy ─────────────────────────────────────────────────────
+async function copyOutput() {
+  const text = outputRaw;
+  if (!text) { setStatus('Нечего копировать', 'err'); return; }
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+  }
+  setStatus('Скопировано в буфер обмена', 'ok');
+}
+
+// ── Reset ────────────────────────────────────────────────────
+async function resetSession() {
+  try {
+    await fetch(`/session/${sessionId}`, { method: 'DELETE', headers: headers() });
+  } catch { /* ignore */ }
+  sessionId = uuid();
+  localStorage.setItem('pii_session_id', sessionId);
+  el.sessId.textContent = sessionId;
+  el.inputTa.value = '';
+  el.outputTa.innerHTML = '';
+  outputRaw = '';
+  renderChips([]);
+  stopTTL();
+  setStatus('Сессия сброшена', 'ok');
+}
+
+// ── Keyboard shortcut: Ctrl/Cmd+Enter → Mask ─────────────────
+document.addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+    e.preventDefault();
+    if (!$('btn-mask').disabled) doMask();
+  }
+});
+
+// ── Boot ─────────────────────────────────────────────────────
+initSession();
+initApiKey();
+pollReady();
+</script>
+</body>
+</html>

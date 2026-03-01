@@ -4,6 +4,7 @@
 
 import json
 import logging
+import pathlib
 import time
 from contextlib import asynccontextmanager
 
@@ -11,8 +12,10 @@ import redis.asyncio as aioredis
 import structlog
 import uvicorn
 from fastapi import FastAPI, HTTPException, Security, Depends
-from fastapi.security.api_key import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
+from fastapi.security.api_key import APIKeyHeader
+from fastapi.staticfiles import StaticFiles
 
 from .config import settings
 from .masker import load_models, mask_text, unmask_text, is_models_loaded
@@ -89,6 +92,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.get("/", include_in_schema=False)
+async def root_redirect():
+    return RedirectResponse(url="/ui/")
 
 
 # ----------------------------------------------------------
@@ -237,6 +245,13 @@ async def delete_session(
     redis_key = f"pii:mapping:{session_id}"
     deleted = await redis.delete(redis_key)
     return SessionDeleteResponse(session_id=session_id, deleted=bool(deleted))
+
+
+# ----------------------------------------------------------
+# Static UI — must be mounted LAST to avoid intercepting API routes
+# ----------------------------------------------------------
+_static_dir = pathlib.Path(__file__).parent / "static"
+app.mount("/ui", StaticFiles(directory=_static_dir, html=True), name="ui")
 
 
 # ----------------------------------------------------------

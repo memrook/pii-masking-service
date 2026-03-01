@@ -66,16 +66,18 @@ def _make_passport_recognizer() -> PatternRecognizer:
       серия 4511 номер 654321  — с подписями (именит.)
       серии 4511 номер 654321  — с подписями (родит.)
       4511 серии 654321        — серия после цифр
+      серии 03 10 № 123456     — серия двумя двузначными группами + №
     """
     return PatternRecognizer(
         supported_entity="PASSPORT_RU",
         supported_language="ru",
         patterns=[
-            Pattern("PASSPORT_NOM",      r"\b\d{4}\s*№\s*\d{6}\b", 0.90),
-            Pattern("PASSPORT_LABELED",  r"(?:серия|серии)\s+\d{4}\s+номер[а]?\s+\d{6}", 0.95),
-            Pattern("PASSPORT_REVERSED", r"\b\d{4}\s+(?:серия|серии)\s+\d{6}\b", 0.85),
-            Pattern("PASSPORT_SPACE",    r"\b\d{4}\s\d{6}\b", 0.85),
-            Pattern("PASSPORT_NOSPACE",  r"\b\d{4}\d{6}\b", 0.70),
+            Pattern("PASSPORT_SPLIT_SERIES", r"(?:серия|серии)\s+\d{2}\s+\d{2}\s*[№#]\s*\d{6}", 0.97),
+            Pattern("PASSPORT_NOM",          r"\b\d{4}\s*№\s*\d{6}\b", 0.90),
+            Pattern("PASSPORT_LABELED",      r"(?:серия|серии)\s+\d{4}\s+номер[а]?\s+\d{6}", 0.95),
+            Pattern("PASSPORT_REVERSED",     r"\b\d{4}\s+(?:серия|серии)\s+\d{6}\b", 0.85),
+            Pattern("PASSPORT_SPACE",        r"\b\d{4}\s\d{6}\b", 0.85),
+            Pattern("PASSPORT_NOSPACE",      r"\b\d{4}\d{6}\b", 0.70),
         ],
         context=["паспорт", "серия", "серии", "номер паспорта", "passport"],
     )
