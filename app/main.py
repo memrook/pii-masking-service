@@ -266,4 +266,5 @@ if __name__ == "__main__":
         port=settings.api_port,
         workers=settings.api_workers,
         log_level=settings.log_level.lower(),
+        root_path=settings.api_root_path,
     )

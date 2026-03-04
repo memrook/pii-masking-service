@@ -125,16 +125,17 @@
     @keyframes scan{0%{opacity:.6;background:var(--bg-tertiary)}50%{background:rgba(91,82,232,.07)}100%{opacity:1;background:var(--bg-tertiary)}}
     textarea.scanning,.output-display.scanning{animation:scan .45s ease}
 
-    /* ── Output display (div вместо readonly textarea) ───── */
+    /* ── Output display (contenteditable) ───────────────── */
     .output-display{
       width:100%;min-height:220px;max-height:480px;overflow-y:auto;
       background:var(--bg-tertiary);border:1px solid var(--border);border-radius:var(--radius);
       color:var(--text-primary);font-family:var(--font-mono);font-size:13px;line-height:1.65;
       padding:10px 12px;
       white-space:pre-wrap;word-break:break-word;
-      cursor:default;opacity:.9;
+      outline:none;
       transition:border-color var(--t),background var(--t);
     }
+    .output-display:focus{border-color:var(--accent)}
     .output-display:empty::before{
       content:attr(data-placeholder);
       color:var(--text-secondary);opacity:.55;pointer-events:none;
@@ -277,9 +278,10 @@
     <div class="panel">
       <div class="panel-hdr">
         <span class="panel-label">Результат</span>
+        <span style="font-size:11px;color:var(--text-secondary);font-style:italic">можно вставить маскированный текст</span>
       </div>
       <div class="ta-wrap">
-        <div id="output-ta" class="output-display" data-placeholder="Маскированный текст появится здесь..."></div>
+        <div id="output-ta" class="output-display" contenteditable="true" spellcheck="false" data-placeholder="Маскированный текст появится здесь или вставьте свой..."></div>
       </div>
       <div class="panel-foot">
         <button class="ok" id="btn-copy" onclick="copyOutput()">Копировать</button>
@@ -516,15 +518,27 @@ async function doMask() {
   }
 }
 
+// ── Output editable sync ──────────────────────────────────────
+el.outputTa.addEventListener('paste', e => {
+  // Вставляем только plain text, без HTML-форматирования
+  e.preventDefault();
+  const plain = (e.clipboardData || window.clipboardData).getData('text/plain');
+  document.execCommand('insertText', false, plain);
+});
+
+el.outputTa.addEventListener('input', () => {
+  outputRaw = el.outputTa.innerText;
+});
+
 // ── Unmask ───────────────────────────────────────────────────
 async function doUnmask() {
-  const text = outputRaw.trim();
+  const text = (outputRaw || el.outputTa.innerText).trim();
   if (!text) { setStatus('Поле результата пустое', 'err'); return; }
   setLoading(true); setBtns(true);
   try {
     const r = await fetch(BASE + 'unmask', {
       method: 'POST', headers: headers(),
-      body: JSON.stringify({ text: outputRaw, session_id: sessionId }),
+      body: JSON.stringify({ text, session_id: sessionId }),
     });
     if (!r.ok) { const e = await r.json(); throw new Error(e.detail || `HTTP ${r.status}`); }
     const d = await r.json();
