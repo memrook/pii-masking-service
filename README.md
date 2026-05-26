@@ -73,9 +73,31 @@ curl -X POST http://localhost:6111/unmask \
 }
 ```
 
+### `POST /unmask-chunk` *(streaming)*
+
+Потоковое демаскирование для SSE-стримов. Поддерживает буфер хвоста в Redis — токен может быть разрезан между чанками (`"PERS"` + `"ON_1"`), сервис удержит хвост до следующего вызова.
+
+```bash
+# Чанк 1 — токен разрезан
+curl -X POST http://localhost:6111/api/unmask-chunk \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Договор с PERS", "session_id": "req_001", "is_final": false}'
+# → {"unmasked_text": "Договор с ", "session_id": "req_001"}
+
+# Чанк 2 — is_final=true сбрасывает буфер
+curl -X POST http://localhost:6111/api/unmask-chunk \
+  -H "Content-Type: application/json" \
+  -d '{"text": "ON_1 готов", "session_id": "req_001", "is_final": true}'
+# → {"unmasked_text": "Иванов Иван готов", "session_id": "req_001"}
+```
+
+**Протокол:** сначала вызовите `/mask` — это создаёт сессию в Redis. Без предварительного `/mask` вернёт 404. При `is_final=true` хвостовой буфер (`pii:tail:{sid}`) удаляется.
+
+**Stateful token allocation:** несколько вызовов `/mask` в одной сессии сохраняют единый счётчик токенов — один и тот же оригинал всегда получает один и тот же токен (`"Иванов"` → `PERSON_1` во всех вызовах), разные оригиналы — разные номера (`PERSON_2`, `PERSON_3` и т.д.).
+
 ### `DELETE /session/{session_id}`
 
-Явно удаляет маппинг сессии до истечения TTL.
+Явно удаляет маппинг и хвостовой буфер сессии до истечения TTL.
 
 ### `GET /stats`
 
