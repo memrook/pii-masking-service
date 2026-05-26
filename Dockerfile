@@ -41,7 +41,7 @@ ENV PYTHONDONTWRITEBYTECODE=1
 
 # Healthcheck — обращаемся к /health
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -sf http://localhost:6111/health || exit 1
+    CMD curl -sf http://localhost:6111/api/health || exit 1
 
 EXPOSE 6111
 

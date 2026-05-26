@@ -30,7 +30,7 @@ services:
     networks:
       - pii-net
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:6111/health || exit 1"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:6111/api/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3

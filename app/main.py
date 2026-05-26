@@ -11,11 +11,11 @@ from contextlib import asynccontextmanager
 import redis.asyncio as aioredis
 import structlog
 import uvicorn
-from fastapi import FastAPI, HTTPException, Security, Depends
+from fastapi import FastAPI, HTTPException, Security, Depends, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.openapi.docs import get_swagger_ui_html, get_redoc_html
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.security.api_key import APIKeyHeader
-from fastapi.staticfiles import StaticFiles
 
 from .config import settings
 from .masker import load_models, mask_text, unmask_text, is_models_loaded
@@ -82,8 +82,8 @@ app = FastAPI(
     description="Маскирование чувствительных данных (ФИО, телефоны, ИНН, организации) для русского и английского текста.",
     version="1.0.0",
     lifespan=lifespan,
-    docs_url="/docs",
-    redoc_url="/redoc",
+    docs_url=None,
+    redoc_url=None,
     root_path=settings.api_root_path,
 )
 
@@ -95,14 +95,28 @@ app.add_middleware(
 )
 
 
-@app.get("/", include_in_schema=False)
-async def root_redirect():
-    return RedirectResponse(url="/ui/")
-
-
 # ----------------------------------------------------------
 # API Key авторизация (опционально)
 # ----------------------------------------------------------
+_openapi_prefix = settings.api_root_path.rstrip("/") if settings.api_root_path else ""
+
+
+@app.get("/api/docs", include_in_schema=False)
+async def custom_swagger_ui() -> HTMLResponse:
+    return get_swagger_ui_html(
+        openapi_url=f"{_openapi_prefix}/openapi.json",
+        title=app.title + " — Swagger UI",
+    )
+
+
+@app.get("/api/redoc", include_in_schema=False)
+async def custom_redoc() -> HTMLResponse:
+    return get_redoc_html(
+        openapi_url=f"{_openapi_prefix}/openapi.json",
+        title=app.title + " — ReDoc",
+    )
+
+
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
@@ -114,10 +128,12 @@ async def check_api_key(api_key: str | None = Security(api_key_header)):
 
 
 # ----------------------------------------------------------
-# Эндпоинты
+# API роутер (все эндпоинты под /api)
 # ----------------------------------------------------------
+api = APIRouter(prefix="/api")
 
-@app.get("/health", response_model=HealthResponse, tags=["System"])
+
+@api.get("/health", response_model=HealthResponse, tags=["System"])
 async def health(redis: aioredis.Redis = Depends(get_redis)):
     """Проверка состояния сервиса."""
     try:
@@ -133,7 +149,7 @@ async def health(redis: aioredis.Redis = Depends(get_redis)):
     )
 
 
-@app.get("/stats", response_model=StatsResponse, tags=["System"])
+@api.get("/stats", response_model=StatsResponse, tags=["System"])
 async def stats(
     redis: aioredis.Redis = Depends(get_redis),
     _=Depends(check_api_key),
@@ -149,7 +165,7 @@ async def stats(
     )
 
 
-@app.post("/mask", response_model=MaskResponse, tags=["Masking"])
+@api.post("/mask", response_model=MaskResponse, tags=["Masking"])
 async def mask(
     request: MaskRequest,
     redis: aioredis.Redis = Depends(get_redis),
@@ -200,10 +216,11 @@ async def mask(
         masked_text=masked_text,
         entities_found=entity_types,
         session_id=request.session_id,
+        ttl=settings.mapping_ttl,
     )
 
 
-@app.post("/unmask", response_model=UnmaskResponse, tags=["Masking"])
+@api.post("/unmask", response_model=UnmaskResponse, tags=["Masking"])
 async def unmask(
     request: UnmaskRequest,
     redis: aioredis.Redis = Depends(get_redis),
@@ -237,7 +254,7 @@ async def unmask(
     )
 
 
-@app.delete("/session/{session_id}", response_model=SessionDeleteResponse, tags=["Session"])
+@api.delete("/session/{session_id}", response_model=SessionDeleteResponse, tags=["Session"])
 async def delete_session(
     session_id: str,
     redis: aioredis.Redis = Depends(get_redis),
@@ -249,11 +266,17 @@ async def delete_session(
     return SessionDeleteResponse(session_id=session_id, deleted=bool(deleted))
 
 
+app.include_router(api)
+
 # ----------------------------------------------------------
-# Static UI — must be mounted LAST to avoid intercepting API routes
+# UI — single-file, no static mount needed
 # ----------------------------------------------------------
-_static_dir = pathlib.Path(__file__).parent / "static"
-app.mount("/ui", StaticFiles(directory=_static_dir, html=True), name="ui")
+_index_html = pathlib.Path(__file__).parent / "static" / "index.html"
+
+
+@app.get("/", include_in_schema=False)
+async def serve_ui():
+    return FileResponse(_index_html, media_type="text/html")
 
 
 # ----------------------------------------------------------
@@ -266,5 +289,4 @@ if __name__ == "__main__":
         port=settings.api_port,
         workers=settings.api_workers,
         log_level=settings.log_level.lower(),
-        root_path=settings.api_root_path,
     )

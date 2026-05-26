@@ -36,6 +36,7 @@ pip-delete-this-directory.txt
 # Docs / planning
 docs/
 docs/plans/
+errors/
 
 # OS
 .DS_Store

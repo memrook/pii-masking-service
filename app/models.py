@@ -30,6 +30,7 @@ class MaskResponse(BaseModel):
         description="Типы найденных PII-сущностей (без оригинальных значений)"
     )
     session_id: str
+    ttl: int = Field(..., description="Время жизни маппинга сессии в секундах")
 
 
 class UnmaskRequest(BaseModel):

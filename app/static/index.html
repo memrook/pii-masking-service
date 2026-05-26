@@ -308,9 +308,9 @@
 </div>
 
 <script>
-// ── Base URL (работает и на / и на /ai/masking/) ─────────────
-// Страница отдаётся из /ui/, API — на уровень выше
-const BASE = window.location.pathname.replace(/\/ui(\/.*)?$/, '/');
+// ── Base URL (работает и на / и на /masking/) ────────────────
+// UI отдаётся из /, API — под /api/
+const BASE = window.location.pathname.replace(/\/+$/, '') + '/api/';
 
 // ── Config ───────────────────────────────────────────────────
 const ENTITY_COLORS = {
@@ -509,7 +509,7 @@ async function doMask() {
     el.outputTa.classList.add('scanning');
     setTimeout(() => el.outputTa.classList.remove('scanning'), 450);
     renderChips(d.entities_found);
-    startTTL(300);
+    startTTL(d.ttl);
     setStatus(`Маскировано — найдено типов сущностей: ${d.entities_found?.length || 0}`, 'ok');
   } catch (e) {
     setStatus(`Ошибка: ${e.message}`, 'err');
