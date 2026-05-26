@@ -53,6 +53,27 @@ class UnmaskResponse(BaseModel):
     tokens_replaced: int = Field(..., description="Количество заменённых токенов")
 
 
+class UnmaskChunkRequest(BaseModel):
+    text: str = Field(..., description="Фрагмент текста с PII-токенами (SSE chunk)")
+    session_id: str = Field(..., description="ID сессии")
+    is_final: bool = Field(default=False, description="True — последний чанк, сбросить буфер хвоста")
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "text": "Договор с PERS",
+                "session_id": "user_12345_req_001",
+                "is_final": False,
+            }
+        }
+    }
+
+
+class UnmaskChunkResponse(BaseModel):
+    unmasked_text: str = Field(..., description="Демаскированная безопасная часть чанка")
+    session_id: str
+
+
 class SessionDeleteResponse(BaseModel):
     session_id: str
     deleted: bool

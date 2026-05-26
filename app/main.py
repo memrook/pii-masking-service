@@ -18,10 +18,11 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.security.api_key import APIKeyHeader
 
 from .config import settings
-from .masker import load_models, mask_text, unmask_text, is_models_loaded
+from .masker import load_models, mask_text, unmask_text, find_safe_boundary, is_models_loaded, _get_token_prefixes
 from .models import (
     MaskRequest, MaskResponse,
     UnmaskRequest, UnmaskResponse,
+    UnmaskChunkRequest, UnmaskChunkResponse,
     SessionDeleteResponse, HealthResponse, StatsResponse,
 )
 
@@ -186,24 +187,24 @@ async def mask(
     if not is_models_loaded():
         raise HTTPException(status_code=503, detail="Модели ещё загружаются")
 
+    # Загружаем существующий маппинг ДО маскирования для stateful allocation
+    redis_key = f"pii:mapping:{request.session_id}"
+    existing_raw = await redis.get(redis_key)
+    existing_mapping: dict[str, str] = json.loads(existing_raw) if existing_raw else {}
+
     try:
         masked_text, mapping, entity_types = mask_text(
             text=request.text,
             session_id=request.session_id,
             language=request.language,
+            existing_mapping=existing_mapping,
         )
     except Exception as e:
         logger.error("mask.error", session_id=request.session_id, error=str(e))
         raise HTTPException(status_code=500, detail=f"Ошибка маскирования: {e}")
 
-    # Сохраняем маппинг в Redis с TTL
-    redis_key = f"pii:mapping:{request.session_id}"
-    if mapping:
-        # Загружаем существующий маппинг (если сессия уже есть) и мерджим
-        existing_raw = await redis.get(redis_key)
-        existing = json.loads(existing_raw) if existing_raw else {}
-        existing.update(mapping)
-        await redis.setex(redis_key, settings.mapping_ttl, json.dumps(existing, ensure_ascii=False))
+    # Сохраняем полный маппинг в Redis с TTL (всегда, даже при пустом mapping)
+    await redis.setex(redis_key, settings.mapping_ttl, json.dumps(mapping, ensure_ascii=False))
 
     logger.info(
         "mask.success",
@@ -254,16 +255,63 @@ async def unmask(
     )
 
 
+@api.post("/unmask-chunk", response_model=UnmaskChunkResponse, tags=["Masking"])
+async def unmask_chunk(
+    request: UnmaskChunkRequest,
+    redis: aioredis.Redis = Depends(get_redis),
+    _=Depends(check_api_key),
+):
+    """
+    Потоковое демаскирование SSE-чанков с буфером хвоста.
+
+    Алгоритм:
+    1. Читает mapping сессии (404 если не было /mask).
+    2. Читает буферный хвост из предыдущего чанка.
+    3. Объединяет хвост + новый чанк.
+    4. Находит безопасную границу (хвост может содержать неполный токен).
+    5. Демаскирует безопасную часть, сохраняет новый хвост.
+    6. На is_final=True сбрасывает всё, удаляет хвост.
+    """
+    mapping_key = f"pii:mapping:{request.session_id}"
+    tail_key = f"pii:tail:{request.session_id}"
+
+    mapping_raw = await redis.get(mapping_key)
+    if mapping_raw is None:
+        raise HTTPException(status_code=404, detail="Сессия не найдена. Сначала вызовите /mask.")
+
+    mapping: dict[str, str] = json.loads(mapping_raw)
+    tail: str = (await redis.get(tail_key)) or ""
+
+    combined = tail + request.text
+
+    if request.is_final:
+        safe_end = len(combined)
+        await redis.delete(tail_key)
+    else:
+        prefixes = _get_token_prefixes()
+        safe_end = find_safe_boundary(combined, prefixes)
+        new_tail = combined[safe_end:]
+        if new_tail:
+            await redis.setex(tail_key, settings.mapping_ttl, new_tail)
+        else:
+            await redis.delete(tail_key)
+
+    safe_text = combined[:safe_end]
+    unmasked, _ = unmask_text(safe_text, mapping)
+
+    return UnmaskChunkResponse(unmasked_text=unmasked, session_id=request.session_id)
+
+
 @api.delete("/session/{session_id}", response_model=SessionDeleteResponse, tags=["Session"])
 async def delete_session(
     session_id: str,
     redis: aioredis.Redis = Depends(get_redis),
     _=Depends(check_api_key),
 ):
-    """Явно удаляет маппинг сессии из Redis (до истечения TTL)."""
-    redis_key = f"pii:mapping:{session_id}"
-    deleted = await redis.delete(redis_key)
-    return SessionDeleteResponse(session_id=session_id, deleted=bool(deleted))
+    """Явно удаляет маппинг и буферный хвост сессии из Redis (до истечения TTL)."""
+    deleted_map = await redis.delete(f"pii:mapping:{session_id}")
+    deleted_tail = await redis.delete(f"pii:tail:{session_id}")
+    return SessionDeleteResponse(session_id=session_id, deleted=bool(deleted_map or deleted_tail))
 
 
 app.include_router(api)

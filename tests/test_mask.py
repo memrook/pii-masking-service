@@ -2,7 +2,7 @@
 import pytest
 from presidio_analyzer import RecognizerResult
 from app import masker
-from app.masker import mask_text
+from app.masker import mask_text, find_safe_boundary
 from tests.helpers import FakeNERTagger, FakeSpan, FakePresidioAnalyzer
 
 
@@ -111,7 +111,8 @@ def test_mask_presidio_receives_correct_entities(setup_stubs, monkeypatch):
     mask_text("текст", "sess")
 
     expected = {"INN_RU", "OGRN_RU", "PHONE_NUMBER", "PHONE_RU",
-                "EMAIL_ADDRESS", "PASSPORT_RU", "SNILS_RU", "ADDRESS_RU", "PERSON"}
+                "EMAIL_ADDRESS", "PASSPORT_RU", "SNILS_RU", "ADDRESS_RU",
+                "PERSON", "CARD", "CREDIT_CARD", "VIN"}
     assert set(analyzer.last_entities_requested) == expected
 
 
@@ -219,6 +220,98 @@ def test_mask_address_from_presidio(setup_stubs, monkeypatch):
     assert mapping["ADDRESS_1"] == address
     assert "ул. Мира" not in masked
     assert "ADDRESS_RU" in types
+
+
+# ── stateful allocator tests ─────────────────────────────────────────────────
+
+def test_mask_continues_counters_from_existing_mapping(setup_stubs, monkeypatch):
+    """mask_text с existing_mapping продолжает счётчики, не сбрасывает их."""
+    text = "Сидоров пришёл"
+    monkeypatch.setattr(masker, "_ner_tagger", FakeNERTagger([
+        FakeSpan(0, 7, "PER", "Сидоров"),
+    ]))
+    existing = {"PERSON_5": "Петров"}
+
+    masked, mapping, _ = mask_text(text, "sess", existing_mapping=existing)
+
+    assert "PERSON_6" in mapping
+    assert mapping["PERSON_6"] == "Сидоров"
+    assert mapping["PERSON_5"] == "Петров"
+    assert masked == "PERSON_6 пришёл"
+
+
+def test_mask_reuses_token_for_same_original(setup_stubs, monkeypatch):
+    """Тот же original в existing_mapping → возвращается тот же токен, новый не создаётся."""
+    text = "Иванов здесь"
+    monkeypatch.setattr(masker, "_ner_tagger", FakeNERTagger([
+        FakeSpan(0, 6, "PER", "Иванов"),
+    ]))
+    existing = {"PERSON_1": "Иванов"}
+
+    masked, mapping, _ = mask_text(text, "sess", existing_mapping=existing)
+
+    assert masked == "PERSON_1 здесь"
+    assert list(mapping.keys()) == ["PERSON_1"]  # не добавлено PERSON_2
+    assert mapping["PERSON_1"] == "Иванов"
+
+
+def test_mask_empty_text_with_existing_mapping(setup_stubs):
+    """Пустой текст с existing_mapping возвращает existing_mapping без изменений."""
+    existing = {"PERSON_1": "Иванов"}
+    masked, mapping, types = mask_text("", "sess", existing_mapping=existing)
+    assert masked == ""
+    assert mapping == {"PERSON_1": "Иванов"}
+    assert types == []
+
+
+# ── find_safe_boundary tests ─────────────────────────────────────────────────
+
+PREFIXES = ["PERSON", "PHONE", "INN"]
+
+
+def test_safe_boundary_full_token_in_middle():
+    """Полный токен в середине строки — граница конец строки (всё безопасно)."""
+    text = "Привет PERSON_1 как дела"
+    assert find_safe_boundary(text, PREFIXES) == len(text)
+
+
+def test_safe_boundary_full_token_at_end():
+    """Полный токен в конце — держим его в буфере (может продолжиться: PERSON_15)."""
+    text = "Привет PERSON_1"
+    boundary = find_safe_boundary(text, PREFIXES)
+    assert boundary == text.index("PERSON_1")
+
+
+def test_safe_boundary_partial_prefix_at_end():
+    """Частичный префикс в конце строки — держим в буфере."""
+    text = "Привет PERS"
+    boundary = find_safe_boundary(text, PREFIXES)
+    assert boundary == text.index("PERS")
+
+
+def test_safe_boundary_full_prefix_no_underscore():
+    """Полный префикс без _ в конце — держим в буфере (split: 'PERSON' + '_1')."""
+    text = "Привет PERSON"
+    boundary = find_safe_boundary(text, PREFIXES)
+    assert boundary == text.index("PERSON")
+
+
+def test_safe_boundary_full_prefix_with_underscore():
+    """Префикс + _ в конце — держим в буфере."""
+    text = "Привет PERSON_"
+    boundary = find_safe_boundary(text, PREFIXES)
+    assert boundary == text.index("PERSON_")
+
+
+def test_safe_boundary_clean_text():
+    """Чистый текст без токенов — граница конец строки."""
+    text = "Привет как дела"
+    assert find_safe_boundary(text, PREFIXES) == len(text)
+
+
+def test_safe_boundary_empty_text():
+    """Пустой текст → 0."""
+    assert find_safe_boundary("", PREFIXES) == 0
 
 
 def test_address_recognizer_patterns():

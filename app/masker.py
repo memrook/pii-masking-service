@@ -297,24 +297,102 @@ _ENTITY_TOKEN_MAP = {
 
 
 # ----------------------------------------------------------
+# Кеш regex-паттернов для find_safe_boundary
+# ----------------------------------------------------------
+
+_TAIL_PATTERN_CACHE: dict[tuple[str, ...], re.Pattern] = {}
+
+
+def _get_token_prefixes() -> list[str]:
+    """Возвращает все уникальные токен-префиксы из текущих настроек."""
+    return list(dict.fromkeys([
+        settings.token_person, settings.token_phone, settings.token_inn,
+        settings.token_ogrn, settings.token_org, settings.token_email,
+        settings.token_passport, settings.token_snils, settings.token_address,
+        settings.token_card, settings.token_vin,
+    ]))
+
+
+def _build_tail_pattern(prefixes: list[str]) -> re.Pattern:
+    parts: list[str] = []
+    for p in prefixes:
+        for i in range(1, len(p)):  # частичные: "P", "PE", ..., "PERSO"
+            parts.append(re.escape(p[:i]))
+        parts.append(re.escape(p))            # полный без "_": "PERSON"
+        parts.append(re.escape(p) + r"_\d*")  # "PERSON_", "PERSON_1", "PERSON_15"
+    parts.sort(key=len, reverse=True)
+    return re.compile(r"(?:" + "|".join(parts) + r")$")
+
+
+def _get_or_build_tail_pattern(prefixes: list[str]) -> re.Pattern:
+    key = tuple(prefixes)
+    cached = _TAIL_PATTERN_CACHE.get(key)
+    if cached is not None:
+        return cached
+    pattern = _build_tail_pattern(prefixes)
+    _TAIL_PATTERN_CACHE[key] = pattern
+    return pattern
+
+
+def find_safe_boundary(text: str, prefixes: list[str]) -> int:
+    """Возвращает позицию, до которой текст безопасно демаскировать.
+
+    Держит в буфере хвост, который может оказаться началом незавершённого токена.
+    """
+    if not text:
+        return 0
+    pattern = _get_or_build_tail_pattern(prefixes)
+    m = pattern.search(text)
+    return m.start() if m else len(text)
+
+
+# ----------------------------------------------------------
 # Основная функция маскирования
 # ----------------------------------------------------------
 
-def mask_text(text: str, session_id: str, language: str = "ru") -> tuple[str, dict[str, str], list[str]]:
+def mask_text(
+    text: str,
+    session_id: str,
+    language: str = "ru",
+    existing_mapping: dict[str, str] | None = None,
+) -> tuple[str, dict[str, str], list[str]]:
     """
     Маскирует ПД в тексте.
 
+    При передаче existing_mapping восстанавливает счётчики из него и переиспользует
+    токены для тех же оригинальных значений (гарантирует, что «Иванов» всегда → PERSON_1).
+
     Returns:
         masked_text  — текст с токенами вместо ПД
-        mapping      — {TOKEN: original_value} для последующего демаскирования
-        entity_types — список найденных типов сущностей
+        mapping      — полный {TOKEN: original_value} включая существующие
+        entity_types — список типов сущностей, найденных в этом вызове
     """
     if not _models_loaded:
         raise RuntimeError("Модели не загружены. Вызовите load_models() при старте.")
 
-    mapping: dict[str, str] = {}
-    counters: dict[str, int] = {}
+    mapping: dict[str, str] = dict(existing_mapping or {})
     entity_types_found: list[str] = []
+
+    # Восстанавливаем счётчики и обратный индекс из существующего mapping
+    counters: dict[str, int] = {}
+    reverse: dict[tuple[str, str], str] = {}
+    for token, original in mapping.items():
+        m = re.match(r"^([A-Z]+)_(\d+)$", token)
+        if m:
+            prefix, num = m.group(1), int(m.group(2))
+            counters[prefix] = max(counters.get(prefix, 0), num)
+            reverse[(prefix, original)] = token
+
+    def _allocate(prefix: str, original: str) -> str:
+        """Возвращает существующий токен для original или создаёт новый."""
+        existing = reverse.get((prefix, original))
+        if existing:
+            return existing
+        counters[prefix] = counters.get(prefix, 0) + 1
+        new_token = f"{prefix}_{counters[prefix]}"
+        mapping[new_token] = original
+        reverse[(prefix, original)] = new_token
+        return new_token
 
     # --- Шаг 1: Natasha NER (Person + Org для русского) ---
     natasha_spans: list[tuple[int, int, str, str]] = []  # (start, end, type, value)
@@ -327,9 +405,7 @@ def mask_text(text: str, session_id: str, language: str = "ru") -> tuple[str, di
         for span in doc.spans:
             if span.type in ("PER", "ORG"):
                 entity_key = _ENTITY_TOKEN_MAP.get(span.type, span.type)
-                counters[entity_key] = counters.get(entity_key, 0) + 1
-                token = f"{entity_key}_{counters[entity_key]}"
-                mapping[token] = span.text
+                token = _allocate(entity_key, span.text)
                 natasha_spans.append((span.start, span.stop, span.type, token))
                 if span.type not in entity_types_found:
                     entity_types_found.append(span.type)
@@ -359,9 +435,7 @@ def mask_text(text: str, session_id: str, language: str = "ru") -> tuple[str, di
 
         original = text[result.start:result.end]
         entity_key = _ENTITY_TOKEN_MAP.get(result.entity_type, result.entity_type)
-        counters[entity_key] = counters.get(entity_key, 0) + 1
-        token = f"{entity_key}_{counters[entity_key]}"
-        mapping[token] = original
+        token = _allocate(entity_key, original)
         presidio_spans.append((result.start, result.end, result.entity_type, token))
 
         if result.entity_type not in entity_types_found:
