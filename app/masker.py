@@ -252,6 +252,60 @@ def _build_presidio_analyzer() -> AnalyzerEngine:
     return analyzer
 
 
+# ----------------------------------------------------------
+# Вспомогательные функции для mask_text
+# ----------------------------------------------------------
+
+def _presidio_entities(language: str) -> list[str]:
+    """Entity types to request from Presidio depending on language.
+
+    For Russian: PHONE_RU (precise +7/8 patterns) replaces aggressive built-in
+    PHONE_NUMBER; PERSON is omitted — natasha NER handles PER/ORG instead.
+    For English: built-in PHONE_NUMBER and PERSON are appropriate.
+    """
+    common = [
+        "INN_RU", "OGRN_RU", "EMAIL_ADDRESS", "PASSPORT_RU", "SNILS_RU",
+        "ADDRESS_RU", "CARD", "CREDIT_CARD", "VIN",
+    ]
+    if language == "ru":
+        return common + ["PHONE_RU"]
+    return common + ["PHONE_NUMBER", "PERSON"]
+
+
+def _resolve_presidio_overlaps(results: list) -> list:
+    """Resolve overlapping Presidio spans, keeping the highest-priority one.
+
+    Priority (descending): custom _RU entities > built-in; higher score; longer span.
+    Greedy left-to-right selection after sorting by priority.
+    """
+    _CUSTOM = frozenset({
+        "INN_RU", "OGRN_RU", "PASSPORT_RU", "SNILS_RU", "ADDRESS_RU",
+        "PHONE_RU", "CARD", "VIN",
+    })
+
+    def _key(r):
+        return (r.entity_type in _CUSTOM, r.score, r.end - r.start)
+
+    kept: list = []
+    for result in sorted(results, key=_key, reverse=True):
+        if not any(
+            not (result.end <= k.start or result.start >= k.end)
+            for k in kept
+        ):
+            kept.append(result)
+    return kept
+
+
+def _is_natasha_fp(span_text: str) -> bool:
+    """True if the natasha NER span is a likely false positive.
+
+    Single all-caps words (document headers like ДОГОВОР, СТОРОНЫ) are not
+    real entities — they're document structure keywords that confuse NER.
+    """
+    words = span_text.split()
+    return len(words) == 1 and len(span_text) > 1 and span_text.isupper()
+
+
 # Глобальные экземпляры (инициализируются один раз через load_models)
 _segmenter: Segmenter | None = None
 _ner_tagger: NewsNERTagger | None = None
@@ -404,24 +458,21 @@ def mask_text(
 
         for span in doc.spans:
             if span.type in ("PER", "ORG"):
+                if _is_natasha_fp(span.text):
+                    continue
                 entity_key = _ENTITY_TOKEN_MAP.get(span.type, span.type)
                 token = _allocate(entity_key, span.text)
                 natasha_spans.append((span.start, span.stop, span.type, token))
                 if span.type not in entity_types_found:
                     entity_types_found.append(span.type)
 
-    # --- Шаг 2: Presidio (телефоны, ИНН, ОГРН, email, паспорт, СНИЛС) ---
+    # --- Шаг 2: Presidio ---
     results = _presidio_analyzer.analyze(
         text=text,
         language=language,
-        entities=[
-            "INN_RU", "OGRN_RU", "PHONE_NUMBER", "PHONE_RU",
-            "EMAIL_ADDRESS", "PASSPORT_RU", "SNILS_RU", "ADDRESS_RU",
-            "PERSON",        # Presidio тоже умеет находить имена (en)
-            "CARD", "CREDIT_CARD",
-            "VIN",
-        ],
+        entities=_presidio_entities(language),
     )
+    results = _resolve_presidio_overlaps(results)
 
     presidio_spans: list[tuple[int, int, str, str]] = []
     for result in results:

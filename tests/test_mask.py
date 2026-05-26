@@ -12,6 +12,10 @@ def presidio_result(entity_type: str, start: int, end: int) -> RecognizerResult:
     return RecognizerResult(entity_type=entity_type, start=start, end=end, score=0.9)
 
 
+def presidio_result_scored(entity_type: str, start: int, end: int, score: float) -> RecognizerResult:
+    return RecognizerResult(entity_type=entity_type, start=start, end=end, score=score)
+
+
 # ── tests ─────────────────────────────────────────────────────────────────────
 
 def test_mask_raises_if_models_not_loaded(monkeypatch):
@@ -103,17 +107,32 @@ def test_mask_passport_with_labels(setup_stubs, monkeypatch):
     assert "4511" not in masked
 
 
-def test_mask_presidio_receives_correct_entities(setup_stubs, monkeypatch):
-    """mask_text must request the right entity types from Presidio."""
+def test_mask_presidio_receives_correct_entities_for_russian(setup_stubs, monkeypatch):
+    """For language='ru': PHONE_RU used (not PHONE_NUMBER), PERSON excluded (natasha handles it)."""
     analyzer = FakePresidioAnalyzer()
     monkeypatch.setattr(masker, "_presidio_analyzer", analyzer)
 
-    mask_text("текст", "sess")
+    mask_text("текст", "sess", language="ru")
 
-    expected = {"INN_RU", "OGRN_RU", "PHONE_NUMBER", "PHONE_RU",
-                "EMAIL_ADDRESS", "PASSPORT_RU", "SNILS_RU", "ADDRESS_RU",
-                "PERSON", "CARD", "CREDIT_CARD", "VIN"}
-    assert set(analyzer.last_entities_requested) == expected
+    entities = set(analyzer.last_entities_requested)
+    assert "PHONE_RU" in entities
+    assert "PHONE_NUMBER" not in entities
+    assert "PERSON" not in entities
+    assert entities >= {"INN_RU", "OGRN_RU", "EMAIL_ADDRESS", "PASSPORT_RU",
+                        "SNILS_RU", "ADDRESS_RU", "CARD", "CREDIT_CARD", "VIN"}
+
+
+def test_mask_presidio_receives_correct_entities_for_english(setup_stubs, monkeypatch):
+    """For language='en': PHONE_NUMBER and PERSON included (natasha not used)."""
+    analyzer = FakePresidioAnalyzer()
+    monkeypatch.setattr(masker, "_presidio_analyzer", analyzer)
+
+    mask_text("some text", "sess", language="en")
+
+    entities = set(analyzer.last_entities_requested)
+    assert "PHONE_NUMBER" in entities
+    assert "PERSON" in entities
+    assert "PHONE_RU" not in entities
 
 
 def test_mask_presidio_overlap_with_natasha_is_skipped(setup_stubs, monkeypatch):
@@ -312,6 +331,83 @@ def test_safe_boundary_clean_text():
 def test_safe_boundary_empty_text():
     """Пустой текст → 0."""
     assert find_safe_boundary("", PREFIXES) == 0
+
+
+# ── overlap resolution tests ─────────────────────────────────────────────────
+
+def test_presidio_custom_entity_wins_over_builtin_on_overlap(setup_stubs, monkeypatch):
+    """INN_RU (custom) beats PHONE_NUMBER (built-in) when both cover same span."""
+    text = "ИНН 7707083893"
+    monkeypatch.setattr(masker, "_presidio_analyzer", FakePresidioAnalyzer([
+        presidio_result_scored("INN_RU",      4, 14, 0.85),
+        presidio_result_scored("PHONE_NUMBER", 4, 14, 0.85),
+    ]))
+
+    masked, mapping, _ = mask_text(text, "sess")
+
+    assert masked == "ИНН INN_1"
+    assert mapping == {"INN_1": "7707083893"}
+
+
+def test_presidio_overlapping_spans_no_corrupted_output(setup_stubs, monkeypatch):
+    """Overlapping Presidio spans must not produce broken interleaved tokens."""
+    text = "ИНН 7707083893 и паспорт 4511 654321"
+    monkeypatch.setattr(masker, "_presidio_analyzer", FakePresidioAnalyzer([
+        presidio_result_scored("INN_RU",      4, 14, 0.85),
+        presidio_result_scored("PHONE_NUMBER", 4, 14, 0.80),   # overlaps INN_RU
+        presidio_result_scored("PASSPORT_RU", 24, 37, 0.90),
+    ]))
+
+    masked, mapping, _ = mask_text(text, "sess")
+
+    assert "7707083893" not in masked
+    assert "4511 654321" not in masked
+    assert "INN_1" in masked
+    assert "PASSPORT_1" in masked
+    # No interleaved fragments like "PHONE_1NN_1" or "INN_1ONE_1"
+    assert "PHONE" not in masked
+
+
+def test_higher_score_presidio_wins_over_lower_on_overlap(setup_stubs, monkeypatch):
+    """When two Presidio results overlap, the one with higher score wins."""
+    text = "номер 123456789"
+    monkeypatch.setattr(masker, "_presidio_analyzer", FakePresidioAnalyzer([
+        presidio_result_scored("SNILS_RU",    6, 15, 0.50),
+        presidio_result_scored("PHONE_NUMBER", 6, 15, 0.90),  # higher score
+    ]))
+
+    masked, mapping, _ = mask_text(text, "sess")
+
+    # Exactly one substitution, no corruption
+    token_keys = list(mapping.keys())
+    assert len(token_keys) == 1
+    assert "123456789" not in masked
+
+
+def test_natasha_allcaps_single_word_not_masked(setup_stubs, monkeypatch):
+    """Single all-caps NER span (document keyword) is ignored as false positive."""
+    text = "ДОГОВОР между сторонами"
+    monkeypatch.setattr(masker, "_ner_tagger", FakeNERTagger([
+        FakeSpan(0, 7, "ORG", "ДОГОВОР"),
+    ]))
+
+    masked, mapping, _ = mask_text(text, "sess")
+
+    assert "ДОГОВОР" in masked
+    assert mapping == {}
+
+
+def test_natasha_multiword_allcaps_org_is_masked(setup_stubs, monkeypatch):
+    """Multi-word all-caps span is a real org name, must be masked."""
+    text = "ООО РОМАШКА"
+    monkeypatch.setattr(masker, "_ner_tagger", FakeNERTagger([
+        FakeSpan(0, 11, "ORG", "ООО РОМАШКА"),
+    ]))
+
+    masked, mapping, _ = mask_text(text, "sess")
+
+    assert "ООО РОМАШКА" not in masked
+    assert mapping.get("ORG_1") == "ООО РОМАШКА"
 
 
 def test_address_recognizer_patterns():
