@@ -317,6 +317,7 @@ const ENTITY_COLORS = {
   PERSON:   '#6c63ff',
   PHONE:    '#4caf7d',
   INN:      '#f0a500',
+  KPP:      '#d4a05c',
   OGRN:     '#e0915c',
   ORG:      '#5cb8e0',
   EMAIL:    '#c75ce0',
@@ -324,8 +325,14 @@ const ENTITY_COLORS = {
   SNILS:    '#5ce0c7',
   ADDRESS:  '#9aa8e0',
   CARD:     '#e05c8a',
+  ACCOUNT:  '#5c9ce0',
+  BIK:      '#a07ae0',
   VIN:      '#7ab87a',
 };
+const TOKEN_RE = new RegExp(
+  '\\b(' + Object.keys(ENTITY_COLORS).join('|') + ')_(\\d+)\\b',
+  'g'
+);
 
 // ── State ────────────────────────────────────────────────────
 let sessionId = '';
@@ -431,13 +438,10 @@ function highlightTokens(text) {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
-  return safe.replace(
-    /\b(PERSON|PHONE|INN|OGRN|ORG|EMAIL|PASSPORT|SNILS|ADDRESS|CARD|VIN)_(\d+)\b/g,
-    (_, type, num) => {
-      const c = ENTITY_COLORS[type] || '#9a9bb0';
-      return `<span class="token" style="color:${c};background:${c}1c;border-color:${c}55">${type}<span class="token-num">_${num}</span></span>`;
-    }
-  );
+  return safe.replace(TOKEN_RE, (_, type, num) => {
+    const c = ENTITY_COLORS[type] || '#9a9bb0';
+    return `<span class="token" style="color:${c};background:${c}1c;border-color:${c}55">${type}<span class="token-num">_${num}</span></span>`;
+  });
 }
 
 // ── Entities ─────────────────────────────────────────────────
