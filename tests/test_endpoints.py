@@ -249,3 +249,16 @@ async def test_delete_session_nonexistent_returns_deleted_false(client):
     resp = await client.delete("/api/session/nonexistent_xyz")
     assert resp.status_code == 200
     assert resp.json()["deleted"] is False
+
+
+# ----------------------------------------------------------
+# /stats endpoint tests
+# ----------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_stats_lists_new_entity_types(client):
+    """/api/stats публичный контракт: список supported_entity_types включает ACCOUNT, BIK, KPP."""
+    resp = await client.get("/api/stats")
+    assert resp.status_code == 200
+    types = set(resp.json()["supported_entity_types"])
+    assert {"ACCOUNT", "BIK", "KPP"} <= types

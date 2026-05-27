@@ -161,7 +161,7 @@ async def stats(
         active_sessions=len(keys),
         supported_entity_types=["PERSON", "PHONE", "INN", "OGRN", "ORG",
                              "EMAIL", "PASSPORT", "SNILS", "ADDRESS",
-                             "CARD", "VIN"],
+                             "CARD", "VIN", "ACCOUNT", "BIK", "KPP"],
         language="ru, en",
     )
 

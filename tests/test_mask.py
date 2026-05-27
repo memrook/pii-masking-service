@@ -410,6 +410,125 @@ def test_natasha_multiword_allcaps_org_is_masked(setup_stubs, monkeypatch):
     assert mapping.get("ORG_1") == "ООО РОМАШКА"
 
 
+# ── PHONE_RU не должен ловить подстроку внутри длинных цифр ─────────────────
+
+def test_phone_ru_does_not_match_inside_long_digit_sequence():
+    """PHONE_7PLUS должен иметь (?<!\\d)/(?!\\d) — иначе ловит 8XXXXXXXXXX внутри 20-значного счёта."""
+    import re
+    from app.masker import _make_ru_phone_recognizer
+    rec = _make_ru_phone_recognizer()
+    p = next(p for p in rec.patterns if p.name == "PHONE_7PLUS")
+    assert not re.search(p.regex, "40702810000000000111")
+    # Реальные телефоны по-прежнему ловятся
+    assert re.search(p.regex, "+7 (495) 123-45-67")
+    assert re.search(p.regex, "89001234567")
+
+
+# ── ACCOUNT/BIK/KPP recognizer-уровень (реальные recognizer'ы, не Fake) ───────
+
+def test_account_recognizer_matches_20_digit():
+    from app.masker import _make_account_recognizer
+    rec = _make_account_recognizer()
+    res = rec.analyze("счёт 40702810000000000111", entities=["ACCOUNT_RU"])
+    assert len(res) == 1
+    assert (res[0].end - res[0].start) == 20
+
+
+def test_bik_recognizer_requires_context_to_the_left():
+    """BIK_RU без слова 'БИК' слева → пусто."""
+    from app.masker import _make_bik_recognizer
+    rec = _make_bik_recognizer()
+    assert rec.analyze("номер 123456789", entities=["BIK_RU"]) == []
+    res = rec.analyze("БИК 044525225", entities=["BIK_RU"])
+    assert len(res) == 1
+    assert res[0].start == 4 and res[0].end == 13
+
+
+def test_kpp_recognizer_requires_context_to_the_left():
+    """KPP_RU без слова 'КПП' слева → пусто."""
+    from app.masker import _make_kpp_recognizer
+    rec = _make_kpp_recognizer()
+    assert rec.analyze("идентификатор 230801001", entities=["KPP_RU"]) == []
+    res = rec.analyze("КПП: 230801001", entities=["KPP_RU"])
+    assert len(res) == 1
+
+
+def test_bik_and_kpp_adjacent_do_not_cross_fire():
+    """`КПП 230801001, БИК 044525225` — каждое число помечено только своим типом.
+
+    Цифры между context-словом и матчем разделяют их: KPP_RU не считает
+    БИК-число своим, BIK_RU не считает КПП-число своим.
+    """
+    from app.masker import _make_bik_recognizer, _make_kpp_recognizer
+    text = "КПП 230801001, БИК 044525225"
+
+    bik_res = _make_bik_recognizer().analyze(text, entities=["BIK_RU"])
+    kpp_res = _make_kpp_recognizer().analyze(text, entities=["KPP_RU"])
+
+    assert len(bik_res) == 1
+    assert text[bik_res[0].start:bik_res[0].end] == "044525225"
+
+    assert len(kpp_res) == 1
+    assert text[kpp_res[0].start:kpp_res[0].end] == "230801001"
+
+
+# ── overlap-резолвер для bank-кодов ──────────────────────────────────────────
+
+def test_resolve_overlap_higher_score_wins_for_bank_codes():
+    """Когда BIK_RU и KPP_RU перекрываются на одном span — побеждает большая score."""
+    from app.masker import _resolve_presidio_overlaps
+    high = presidio_result_scored("BIK_RU", 0, 9, 0.95)
+    low  = presidio_result_scored("KPP_RU", 0, 9, 0.85)
+    kept = _resolve_presidio_overlaps([low, high])
+    assert len(kept) == 1
+    assert kept[0].entity_type == "BIK_RU"
+
+
+# ── Integration через mask_text + FakeAnalyzer ────────────────────────────────
+
+def test_account_masked_via_mask_text(setup_stubs, monkeypatch):
+    """ACCOUNT_RU span → ACCOUNT_1."""
+    text = "расчётный счёт 40702810000000000111"
+    start = text.index("40702810000000000111")
+    monkeypatch.setattr(masker, "_presidio_analyzer", FakePresidioAnalyzer([
+        presidio_result("ACCOUNT_RU", start, start + 20),
+    ]))
+    masked, mapping, _ = mask_text(text, "sess")
+    assert masked == "расчётный счёт ACCOUNT_1"
+    assert mapping == {"ACCOUNT_1": "40702810000000000111"}
+
+
+def test_bik_masked_via_mask_text(setup_stubs, monkeypatch):
+    """BIK_RU span → BIK_1."""
+    text = "БИК 044525225"
+    monkeypatch.setattr(masker, "_presidio_analyzer", FakePresidioAnalyzer([
+        presidio_result("BIK_RU", 4, 13),
+    ]))
+    masked, mapping, _ = mask_text(text, "sess")
+    assert masked == "БИК BIK_1"
+    assert mapping == {"BIK_1": "044525225"}
+
+
+def test_kpp_masked_via_mask_text(setup_stubs, monkeypatch):
+    """KPP_RU span → KPP_1."""
+    text = "КПП: 230801001"
+    monkeypatch.setattr(masker, "_presidio_analyzer", FakePresidioAnalyzer([
+        presidio_result("KPP_RU", 5, 14),
+    ]))
+    masked, mapping, _ = mask_text(text, "sess")
+    assert masked == "КПП: KPP_1"
+    assert mapping == {"KPP_1": "230801001"}
+
+
+def test_account_bik_kpp_in_presidio_entity_request(setup_stubs, monkeypatch):
+    """mask_text запрашивает у Presidio типы ACCOUNT_RU, BIK_RU, KPP_RU для ru."""
+    analyzer = FakePresidioAnalyzer()
+    monkeypatch.setattr(masker, "_presidio_analyzer", analyzer)
+    mask_text("текст", "sess", language="ru")
+    entities = set(analyzer.last_entities_requested)
+    assert {"ACCOUNT_RU", "BIK_RU", "KPP_RU"} <= entities
+
+
 def test_address_recognizer_patterns():
     """Regex patterns inside the recognizer match all target address formats."""
     import re

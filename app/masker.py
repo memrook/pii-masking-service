@@ -115,13 +115,21 @@ def _make_snils_recognizer() -> PatternRecognizer:
 
 
 def _make_ru_phone_recognizer() -> PatternRecognizer:
-    """Российские телефоны: +7, 8, форматы с дефисами и скобками."""
+    """Российские телефоны: +7, 8, форматы с дефисами и скобками.
+
+    Lookbehind (?<!\\d) и lookahead (?!\\d) защищают от срабатывания на
+    подстроку внутри длинной цифровой последовательности (расчётный счёт и т.п.).
+    """
     return PatternRecognizer(
         supported_entity="PHONE_RU",
         supported_language="ru",
         patterns=[
-            Pattern("PHONE_7PLUS", r"(\+7|8)[\s\-]?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}", 0.90),
-            Pattern("PHONE_SHORT",  r"\b\d{3}[\s\-]\d{2}[\s\-]\d{2}\b", 0.60),
+            Pattern(
+                "PHONE_7PLUS",
+                r"(?<!\d)(\+7|8)[\s\-]?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}(?!\d)",
+                0.90,
+            ),
+            Pattern("PHONE_SHORT", r"\b\d{3}[\s\-]\d{2}[\s\-]\d{2}\b", 0.60),
         ],
     )
 
@@ -197,6 +205,85 @@ def _make_card_recognizer(language: str = "ru") -> PatternRecognizer:
     )
 
 
+class _ContextRequiredRecognizer(PatternRecognizer):
+    """PatternRecognizer, валидирующий каждый матч по строгому контексту слева.
+
+    context-слово должно встречаться в LEFT_WINDOW символах перед матчем, и
+    между концом context-слова и началом матча не должно быть другого цифрового
+    блока (≥ NOISE_DIGITS цифр). Защищает от cross-firing когда два recognizer'а
+    делят один regex (BIK_RU/KPP_RU оба матчат \\d{9}) и context-слова обоих
+    находятся в соседних блоках реквизитов.
+    """
+
+    LEFT_WINDOW = 30
+    NOISE_DIGITS = 4
+
+    def analyze(self, text, entities, nlp_artifacts=None, regex_flags=None):
+        results = super().analyze(text, entities, nlp_artifacts, regex_flags)
+        if not self.context:
+            return results
+
+        ctx_terms = [c.lower() for c in self.context]
+        text_lower = text.lower()
+        noise_re = re.compile(rf"\d{{{self.NOISE_DIGITS},}}")
+        kept = []
+
+        for r in results:
+            ws = max(0, r.start - self.LEFT_WINDOW)
+            left_window = text_lower[ws:r.start]
+
+            best_end_in_text = -1
+            for term in ctx_terms:
+                pos = left_window.rfind(term)
+                if pos < 0:
+                    continue
+                end_in_text = ws + pos + len(term)
+                if end_in_text > best_end_in_text:
+                    best_end_in_text = end_in_text
+
+            if best_end_in_text < 0:
+                continue
+            if noise_re.search(text[best_end_in_text:r.start]):
+                continue
+            kept.append(r)
+        return kept
+
+
+def _make_account_recognizer() -> PatternRecognizer:
+    """Расчётный/корреспондентский счёт РФ: 20 цифр.
+
+    Паттерн `\\b\\d{20}\\b` сам по себе очень специфичен (20 цифр подряд за
+    пределами банковских реквизитов — редкость), поэтому context используется
+    только для score-boost через стандартный механизм Presidio, но не обязателен.
+    """
+    return PatternRecognizer(
+        supported_entity="ACCOUNT_RU",
+        supported_language="ru",
+        patterns=[Pattern("ACCOUNT_20", r"\b\d{20}\b", 0.85)],
+        context=["счёт", "счет", "р/с", "к/с", "расчёт", "расчет", "корреспондент"],
+    )
+
+
+def _make_bik_recognizer() -> PatternRecognizer:
+    """БИК: 9 цифр. Контекстное слово 'БИК' слева обязательно."""
+    return _ContextRequiredRecognizer(
+        supported_entity="BIK_RU",
+        supported_language="ru",
+        patterns=[Pattern("BIK_9", r"\b\d{9}\b", 0.85)],
+        context=["бик", "bik"],
+    )
+
+
+def _make_kpp_recognizer() -> PatternRecognizer:
+    """КПП: 9 цифр. Контекстное слово 'КПП' слева обязательно."""
+    return _ContextRequiredRecognizer(
+        supported_entity="KPP_RU",
+        supported_language="ru",
+        patterns=[Pattern("KPP_9", r"\b\d{9}\b", 0.85)],
+        context=["кпп", "kpp"],
+    )
+
+
 def _make_vin_recognizer(language: str = "ru") -> PatternRecognizer:
     """VIN транспортного средства по ISO 3779: 17 символов [A-HJ-NPR-Z0-9].
 
@@ -246,6 +333,9 @@ def _build_presidio_analyzer() -> AnalyzerEngine:
         _make_card_recognizer("en"),
         _make_vin_recognizer("ru"),
         _make_vin_recognizer("en"),
+        _make_account_recognizer(),
+        _make_bik_recognizer(),
+        _make_kpp_recognizer(),
     ]:
         analyzer.registry.add_recognizer(recognizer)
 
@@ -266,6 +356,7 @@ def _presidio_entities(language: str) -> list[str]:
     common = [
         "INN_RU", "OGRN_RU", "EMAIL_ADDRESS", "PASSPORT_RU", "SNILS_RU",
         "ADDRESS_RU", "CARD", "CREDIT_CARD", "VIN",
+        "ACCOUNT_RU", "BIK_RU", "KPP_RU",
     ]
     if language == "ru":
         return common + ["PHONE_RU"]
@@ -281,6 +372,7 @@ def _resolve_presidio_overlaps(results: list) -> list:
     _CUSTOM = frozenset({
         "INN_RU", "OGRN_RU", "PASSPORT_RU", "SNILS_RU", "ADDRESS_RU",
         "PHONE_RU", "CARD", "VIN",
+        "ACCOUNT_RU", "BIK_RU", "KPP_RU",
     })
 
     def _key(r):
@@ -347,6 +439,9 @@ _ENTITY_TOKEN_MAP = {
     "CARD":          settings.token_card,
     "CREDIT_CARD":   settings.token_card,      # Presidio built-in (EN)
     "VIN":           settings.token_vin,
+    "ACCOUNT_RU":    settings.token_account,
+    "BIK_RU":        settings.token_bik,
+    "KPP_RU":        settings.token_kpp,
 }
 
 
@@ -364,6 +459,7 @@ def _get_token_prefixes() -> list[str]:
         settings.token_ogrn, settings.token_org, settings.token_email,
         settings.token_passport, settings.token_snils, settings.token_address,
         settings.token_card, settings.token_vin,
+        settings.token_account, settings.token_bik, settings.token_kpp,
     ]))
 
 

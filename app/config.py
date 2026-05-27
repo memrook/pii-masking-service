@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     token_address: str = "ADDRESS"
     token_card: str = "CARD"
     token_vin: str = "VIN"
+    token_account: str = "ACCOUNT"
+    token_bik: str = "BIK"
+    token_kpp: str = "KPP"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
