@@ -33,6 +33,9 @@ pip-delete-this-directory.txt
 # Docker
 *.log
 
+# Deploy (содержит внутреннюю топологию сети — IP, jumphost)
+deploy-prod.sh
+
 # Docs / planning
 docs/
 docs/plans/
