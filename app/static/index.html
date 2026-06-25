@@ -270,6 +270,9 @@
           <option value="ru">RU</option>
           <option value="en">EN</option>
         </select>
+        <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text-secondary);cursor:pointer;padding:0 10px" title="Вшить подсказку для LLM в начало результата">
+          <input type="checkbox" id="prepend-hint" checked> Подсказка для ИИ
+        </label>
         <button class="primary" id="btn-mask" onclick="doMask()">Маскировать →</button>
       </div>
     </div>
@@ -329,11 +332,6 @@ const ENTITY_COLORS = {
   BIK:      '#a07ae0',
   VIN:      '#7ab87a',
 };
-const TOKEN_RE = new RegExp(
-  '\\b(' + Object.keys(ENTITY_COLORS).join('|') + ')_(\\d+)\\b',
-  'g'
-);
-
 // ── State ────────────────────────────────────────────────────
 let sessionId = '';
 let apiKey    = '';
@@ -431,17 +429,29 @@ function stopTTL() {
   el.ttl.className = 'ttl';
 }
 
-// ── Token highlighting ────────────────────────────────────────
-function highlightTokens(text) {
+// ── Highlighting по masked_spans ──────────────────────────────
+// Индексы из API — Unicode code points, поэтому работаем через Array.from
+// (а не прямой slice по строке): корректно для emoji/суррогатных пар.
+function escapeHtml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function highlightSpans(text, spans) {
   if (!text) return '';
-  const safe = text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-  return safe.replace(TOKEN_RE, (_, type, num) => {
-    const c = ENTITY_COLORS[type] || '#9a9bb0';
-    return `<span class="token" style="color:${c};background:${c}1c;border-color:${c}55">${type}<span class="token-num">_${num}</span></span>`;
-  });
+  if (!spans || !spans.length) return escapeHtml(text);
+  const chars = Array.from(text);
+  const sorted = [...spans].sort((a, b) => a.start - b.start);
+  let out = '', cursor = 0;
+  for (const s of sorted) {
+    if (s.start < cursor) continue;  // защита от перекрытий
+    out += escapeHtml(chars.slice(cursor, s.start).join(''));
+    const val = chars.slice(s.start, s.end).join('');
+    const c = ENTITY_COLORS[s.type] || '#9a9bb0';
+    out += `<span class="token" style="color:${c};background:${c}1c;border-color:${c}55">${escapeHtml(val)}</span>`;
+    cursor = s.end;
+  }
+  out += escapeHtml(chars.slice(cursor).join(''));
+  return out;
 }
 
 // ── Entities ─────────────────────────────────────────────────
@@ -500,21 +510,23 @@ async function doMask() {
   const text = el.inputTa.value.trim();
   if (!text) { setStatus('Введите текст для маскирования', 'err'); return; }
   const lang = $('lang-sel').value;
+  const prependHint = $('prepend-hint').checked;
   setLoading(true); setBtns(true);
   try {
     const r = await fetch(BASE + 'mask', {
       method: 'POST', headers: headers(),
-      body: JSON.stringify({ text, session_id: sessionId, language: lang }),
+      body: JSON.stringify({ text, session_id: sessionId, language: lang, prepend_hint: prependHint }),
     });
     if (!r.ok) { const e = await r.json(); throw new Error(e.detail || `HTTP ${r.status}`); }
     const d = await r.json();
     outputRaw = d.masked_text;
-    el.outputTa.innerHTML = highlightTokens(d.masked_text);
+    el.outputTa.innerHTML = highlightSpans(d.masked_text, d.masked_spans);
     el.outputTa.classList.add('scanning');
     setTimeout(() => el.outputTa.classList.remove('scanning'), 450);
     renderChips(d.entities_found);
     startTTL(d.ttl);
-    setStatus(`Маскировано — найдено типов сущностей: ${d.entities_found?.length || 0}`, 'ok');
+    const hintNote = d.hint ? (prependHint ? ' · подсказка вшита в начало' : ' · есть подсказка (поле hint)') : '';
+    setStatus(`Маскировано — найдено типов сущностей: ${d.entities_found?.length || 0}${hintNote}`, 'ok');
   } catch (e) {
     setStatus(`Ошибка: ${e.message}`, 'err');
   } finally {

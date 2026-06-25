@@ -17,8 +17,11 @@ from fastapi.openapi.docs import get_swagger_ui_html, get_redoc_html
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.security.api_key import APIKeyHeader
 
-from .config import settings
-from .masker import load_models, mask_text, unmask_text, find_safe_boundary, is_models_loaded, _get_token_prefixes
+from .config import settings, validate_config
+from .masker import (
+    load_models, mask_text, unmask_text, find_safe_boundary,
+    is_models_loaded, entries_to_out_map,
+)
 from .models import (
     MaskRequest, MaskResponse,
     UnmaskRequest, UnmaskResponse,
@@ -64,6 +67,8 @@ async def get_redis() -> aioredis.Redis:
 # ----------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Fail-fast: проверяем конфигурацию (обязательный SURROGATE_SECRET, группы типов, метки)
+    validate_config(settings)
     logger.info("pii_masking_service.startup", message="Загрузка NLP моделей...")
     start = time.time()
     load_models()
@@ -175,47 +180,90 @@ async def mask(
     """
     Маскирует PII в тексте и сохраняет маппинг в Redis с TTL.
 
-    - Заменяет ФИО → PERSON_N
-    - Заменяет телефоны → PHONE_N
-    - Заменяет ИНН → INN_N
-    - Заменяет ОГРН → OGRN_N
-    - Заменяет организации → ORG_N
-    - Заменяет email → EMAIL_N
-    - Заменяет паспорта → PASSPORT_N
-    - Заменяет СНИЛС → SNILS_N
+    Гибрид: цифры/коды (PHONE, INN, OGRN, EMAIL, PASSPORT, SNILS, CARD, VIN,
+    ACCOUNT, BIK, KPP) → реалистичные суррогаты; имена/орг/адреса (PERSON, ORG,
+    ADDRESS) → метки вида "[Имя 1]". Подсказка про метки возвращается в поле hint.
+
+    Контракт: принимает ИСХОДНЫЙ текст (не уже замаскированный); запросы одной
+    сессии — на одном языке и строго последовательны (single-writer).
+
+    Коды ошибок:
+    - 409: язык запроса не совпадает с языком сессии, либо текст содержит ранее
+      созданный токен этой сессии (нужна новая сессия).
     """
     if not is_models_loaded():
         raise HTTPException(status_code=503, detail="Модели ещё загружаются")
 
-    # Загружаем существующий маппинг ДО маскирования для stateful allocation
+    # Загружаем существующий mapping ДО маскирования для stateful allocation
     redis_key = f"pii:mapping:{request.session_id}"
     existing_raw = await redis.get(redis_key)
-    existing_mapping: dict[str, str] = json.loads(existing_raw) if existing_raw else {}
+
+    existing_entries: list[dict] = []
+    if existing_raw:
+        existing_obj = json.loads(existing_raw)
+        stored_lang = existing_obj.get("language", request.language)
+        existing_entries = existing_obj.get("entries", [])
+
+        if stored_lang != request.language:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Сессия использует язык '{stored_lang}', а запрос — "
+                       f"'{request.language}'. Один язык на сессию: создайте новую сессию.",
+            )
+        # Коллизия: новый текст содержит ранее созданный out → unmask повредил бы текст
+        for e in existing_entries:
+            if e["out"] in request.text:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Текст содержит ранее выданный этой сессией токен. "
+                           "Создайте новую сессию.",
+                )
 
     try:
-        masked_text, mapping, entity_types = mask_text(
+        masked_text, entries, entity_types, masked_spans = mask_text(
             text=request.text,
             session_id=request.session_id,
             language=request.language,
-            existing_mapping=existing_mapping,
+            existing_entries=existing_entries,
         )
     except Exception as e:
         logger.error("mask.error", session_id=request.session_id, error=str(e))
         raise HTTPException(status_code=500, detail=f"Ошибка маскирования: {e}")
 
-    # Сохраняем полный маппинг в Redis с TTL (всегда, даже при пустом mapping)
-    await redis.setex(redis_key, settings.mapping_ttl, json.dumps(mapping, ensure_ascii=False))
+    # Сохраняем mapping (язык + записи) в Redis с TTL (всегда, даже если пусто)
+    mapping_obj = {"language": request.language, "entries": entries}
+    await redis.setex(redis_key, settings.mapping_ttl, json.dumps(mapping_obj, ensure_ascii=False))
+
+    # hint только если в этом masked_text есть метки
+    marker_set = set(settings.marker_types)
+    has_marker = any(s["type"] in marker_set for s in masked_spans)
+    hint = None
+    if has_marker:
+        hint = settings.hint_text_en if request.language == "en" else settings.hint_text_ru
+
+    # Опционально вшиваем подсказку в начало masked_text со сдвигом masked_spans.
+    # len() в Python считает code points — это согласуется с форматом индексов span.
+    if request.prepend_hint and hint:
+        prefix = hint + "\n\n"
+        offset = len(prefix)
+        masked_text = prefix + masked_text
+        masked_spans = [
+            {"start": s["start"] + offset, "end": s["end"] + offset, "type": s["type"]}
+            for s in masked_spans
+        ]
 
     logger.info(
         "mask.success",
         session_id=request.session_id,
         entities_found=entity_types,
-        tokens_created=len(mapping),
+        tokens_total=len(entries),
     )
 
     return MaskResponse(
         masked_text=masked_text,
         entities_found=entity_types,
+        hint=hint,
+        masked_spans=masked_spans,
         session_id=request.session_id,
         ttl=settings.mapping_ttl,
     )
@@ -243,8 +291,9 @@ async def unmask(
             tokens_replaced=0,
         )
 
-    mapping: dict[str, str] = json.loads(raw)
-    unmasked_text, tokens_replaced = unmask_text(request.text, mapping)
+    mapping_obj = json.loads(raw)
+    out_map = entries_to_out_map(mapping_obj.get("entries", []))
+    unmasked_text, tokens_replaced = unmask_text(request.text, out_map)
 
     logger.info("unmask.success", session_id=request.session_id, tokens_replaced=tokens_replaced)
 
@@ -264,11 +313,15 @@ async def unmask_chunk(
     """
     Потоковое демаскирование SSE-чанков с буфером хвоста.
 
+    Контракт: чанки одной сессии должны поступать строго последовательно
+    (single-writer) — параллельные чанки создали бы гонку при обновлении хвоста.
+
     Алгоритм:
     1. Читает mapping сессии (404 если не было /mask).
     2. Читает буферный хвост из предыдущего чанка.
     3. Объединяет хвост + новый чанк.
-    4. Находит безопасную границу (хвост может содержать неполный токен).
+    4. Находит безопасную границу по фактическим out (хвост может содержать
+       неполный out или короткий out, являющийся префиксом более длинного).
     5. Демаскирует безопасную часть, сохраняет новый хвост.
     6. На is_final=True сбрасывает всё, удаляет хвост.
     """
@@ -279,7 +332,8 @@ async def unmask_chunk(
     if mapping_raw is None:
         raise HTTPException(status_code=404, detail="Сессия не найдена. Сначала вызовите /mask.")
 
-    mapping: dict[str, str] = json.loads(mapping_raw)
+    mapping_obj = json.loads(mapping_raw)
+    out_map = entries_to_out_map(mapping_obj.get("entries", []))
     tail: str = (await redis.get(tail_key)) or ""
 
     combined = tail + request.text
@@ -288,8 +342,7 @@ async def unmask_chunk(
         safe_end = len(combined)
         await redis.delete(tail_key)
     else:
-        prefixes = _get_token_prefixes()
-        safe_end = find_safe_boundary(combined, prefixes)
+        safe_end = find_safe_boundary(combined, list(out_map.keys()))
         new_tail = combined[safe_end:]
         if new_tail:
             await redis.setex(tail_key, settings.mapping_ttl, new_tail)
@@ -297,7 +350,7 @@ async def unmask_chunk(
             await redis.delete(tail_key)
 
     safe_text = combined[:safe_end]
-    unmasked, _ = unmask_text(safe_text, mapping)
+    unmasked, _ = unmask_text(safe_text, out_map)
 
     return UnmaskChunkResponse(unmasked_text=unmasked, session_id=request.session_id)
 

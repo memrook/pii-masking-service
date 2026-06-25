@@ -24,6 +24,7 @@ from presidio_analyzer.nlp_engine import NlpEngineProvider
 from presidio_anonymizer import AnonymizerEngine
 
 from .config import settings
+from .surrogates import generate_surrogate
 
 logger = logging.getLogger(__name__)
 
@@ -388,6 +389,25 @@ def _resolve_presidio_overlaps(results: list) -> list:
     return kept
 
 
+def _clip_natasha_span(text: str, start: int, stop: int) -> tuple[int, int]:
+    """Клиппит natasha-спан по первому переносу строки и обрезает кромочные пробелы.
+
+    Natasha NER иногда жадно растягивает PER/ORG через перенос строки, захватывая
+    слова со следующей строки (напр. ORG = 'АО «Банк» \\n БИК'). Замена такого спана
+    меткой съедала бы перенос строки и чужой текст. Сущность реально не пересекает
+    строку — клиппим до первого '\\n'.
+    """
+    seg = text[start:stop]
+    nl = seg.find("\n")
+    if nl != -1:
+        stop = start + nl
+    while stop > start and text[stop - 1].isspace():
+        stop -= 1
+    while start < stop and text[start].isspace():
+        start += 1
+    return start, stop
+
+
 def _is_natasha_fp(span_text: str) -> bool:
     """True if the natasha NER span is a likely false positive.
 
@@ -422,78 +442,61 @@ def is_models_loaded() -> bool:
 
 
 # ----------------------------------------------------------
-# Карта: тип сущности → токен-префикс
+# Карта: тип сущности детектора → канонический тип
 # ----------------------------------------------------------
-_ENTITY_TOKEN_MAP = {
-    "PERSON":        settings.token_person,
-    "PER":           settings.token_person,    # natasha использует PER
-    "INN_RU":        settings.token_inn,
-    "OGRN_RU":       settings.token_ogrn,
-    "ORG":           settings.token_org,
-    "EMAIL_ADDRESS": settings.token_email,
-    "PHONE_NUMBER":  settings.token_phone,
-    "PHONE_RU":      settings.token_phone,
-    "PASSPORT_RU":   settings.token_passport,
-    "SNILS_RU":      settings.token_snils,
-    "ADDRESS_RU":    settings.token_address,
-    "CARD":          settings.token_card,
-    "CREDIT_CARD":   settings.token_card,      # Presidio built-in (EN)
-    "VIN":           settings.token_vin,
-    "ACCOUNT_RU":    settings.token_account,
-    "BIK_RU":        settings.token_bik,
-    "KPP_RU":        settings.token_kpp,
+# Разные детекторы дают разные entity_type для одной сущности (PER/PERSON,
+# PHONE_RU/PHONE_NUMBER, CARD/CREDIT_CARD). Каноника сводит их к единому типу.
+_CANONICAL_TYPE = {
+    "PERSON":        "PERSON",
+    "PER":           "PERSON",    # natasha использует PER
+    "INN_RU":        "INN",
+    "OGRN_RU":       "OGRN",
+    "ORG":           "ORG",
+    "EMAIL_ADDRESS": "EMAIL",
+    "PHONE_NUMBER":  "PHONE",
+    "PHONE_RU":      "PHONE",
+    "PASSPORT_RU":   "PASSPORT",
+    "SNILS_RU":      "SNILS",
+    "ADDRESS_RU":    "ADDRESS",
+    "CARD":          "CARD",
+    "CREDIT_CARD":   "CARD",      # Presidio built-in (EN)
+    "VIN":           "VIN",
+    "ACCOUNT_RU":    "ACCOUNT",
+    "BIK_RU":        "BIK",
+    "KPP_RU":        "KPP",
 }
 
 
-# ----------------------------------------------------------
-# Кеш regex-паттернов для find_safe_boundary
-# ----------------------------------------------------------
+def find_safe_boundary(text: str, outs: list[str]) -> int:
+    """Позиция, до которой текст безопасно демаскировать (потоковый режим).
 
-_TAIL_PATTERN_CACHE: dict[tuple[str, ...], re.Pattern] = {}
+    Держит в хвосте суффикс, который является СОБСТВЕННЫМ ПРЕФИКСОМ хотя бы
+    одного out — то есть может оказаться началом незавершённого out, который
+    «дорастёт» в следующем чанке.
 
+    Префиксная неоднозначность: если один out является префиксом другого
+    (например "12345" ⊂ "123456"), то полностью совпавший короткий out в конце
+    чанка тоже удерживается (он — собственный префикс длинного), пока
+    продолжение не исключено.
 
-def _get_token_prefixes() -> list[str]:
-    """Возвращает все уникальные токен-префиксы из текущих настроек."""
-    return list(dict.fromkeys([
-        settings.token_person, settings.token_phone, settings.token_inn,
-        settings.token_ogrn, settings.token_org, settings.token_email,
-        settings.token_passport, settings.token_snils, settings.token_address,
-        settings.token_card, settings.token_vin,
-        settings.token_account, settings.token_bik, settings.token_kpp,
-    ]))
-
-
-def _build_tail_pattern(prefixes: list[str]) -> re.Pattern:
-    parts: list[str] = []
-    for p in prefixes:
-        for i in range(1, len(p)):  # частичные: "P", "PE", ..., "PERSO"
-            parts.append(re.escape(p[:i]))
-        parts.append(re.escape(p))            # полный без "_": "PERSON"
-        parts.append(re.escape(p) + r"_\d*")  # "PERSON_", "PERSON_1", "PERSON_15"
-    parts.sort(key=len, reverse=True)
-    return re.compile(r"(?:" + "|".join(parts) + r")$")
-
-
-def _get_or_build_tail_pattern(prefixes: list[str]) -> re.Pattern:
-    key = tuple(prefixes)
-    cached = _TAIL_PATTERN_CACHE.get(key)
-    if cached is not None:
-        return cached
-    pattern = _build_tail_pattern(prefixes)
-    _TAIL_PATTERN_CACHE[key] = pattern
-    return pattern
-
-
-def find_safe_boundary(text: str, prefixes: list[str]) -> int:
-    """Возвращает позицию, до которой текст безопасно демаскировать.
-
-    Держит в буфере хвост, который может оказаться началом незавершённого токена.
+    Args:
+        text: объединённый хвост + текущий чанк.
+        outs: фактические out-значения текущей сессии.
     """
     if not text:
         return 0
-    pattern = _get_or_build_tail_pattern(prefixes)
-    m = pattern.search(text)
-    return m.start() if m else len(text)
+    outs = [o for o in outs if o]
+    if not outs:
+        return len(text)
+
+    n = len(text)
+    max_out_len = max(len(o) for o in outs)
+    # Собственный префикс короче самого out, значит держим максимум max_out_len-1.
+    for L in range(min(n, max_out_len - 1), 0, -1):
+        suffix = text[n - L:]
+        if any(len(suffix) < len(o) and o.startswith(suffix) for o in outs):
+            return n - L
+    return n
 
 
 # ----------------------------------------------------------
@@ -504,48 +507,80 @@ def mask_text(
     text: str,
     session_id: str,
     language: str = "ru",
-    existing_mapping: dict[str, str] | None = None,
-) -> tuple[str, dict[str, str], list[str]]:
+    existing_entries: list[dict] | None = None,
+) -> tuple[str, list[dict], list[str], list[dict]]:
     """
-    Маскирует ПД в тексте.
+    Маскирует ПД в тексте по гибридной схеме (суррогаты + метки).
 
-    При передаче existing_mapping восстанавливает счётчики из него и переиспользует
-    токены для тех же оригинальных значений (гарантирует, что «Иванов» всегда → PERSON_1).
+    Суррогатные типы (цифры/коды) заменяются реалистичными тестовыми значениями;
+    marker-типы (имена/орг/адреса) — инертными метками вида "[Имя 1]".
+
+    При передаче existing_entries восстанавливает счётчики меток и обратный индекс,
+    переиспользуя тот же out для того же оригинала (идемпотентность в пределах сессии).
+
+    Args:
+        text: исходный текст.
+        session_id: ID сессии (входит в сид суррогатов).
+        language: 'ru' или 'en' (определяет подписи меток и pipeline детекции).
+        existing_entries: записи mapping из предыдущих /mask этой сессии.
 
     Returns:
-        masked_text  — текст с токенами вместо ПД
-        mapping      — полный {TOKEN: original_value} включая существующие
-        entity_types — список типов сущностей, найденных в этом вызове
+        masked_text   — текст с суррогатами/метками вместо ПД
+        entries       — полный список записей mapping (включая существующие)
+        entity_types  — канонические типы, найденные в этом вызове
+        masked_spans  — диапазоны out в ИТОГОВОМ masked_text (code points)
     """
     if not _models_loaded:
         raise RuntimeError("Модели не загружены. Вызовите load_models() при старте.")
 
-    mapping: dict[str, str] = dict(existing_mapping or {})
+    entries: list[dict] = list(existing_entries or [])
     entity_types_found: list[str] = []
 
-    # Восстанавливаем счётчики и обратный индекс из существующего mapping
+    # Восстанавливаем счётчики меток и обратный индекс из существующих записей
     counters: dict[str, int] = {}
     reverse: dict[tuple[str, str], str] = {}
-    for token, original in mapping.items():
-        m = re.match(r"^([A-Z]+)_(\d+)$", token)
-        if m:
-            prefix, num = m.group(1), int(m.group(2))
-            counters[prefix] = max(counters.get(prefix, 0), num)
-            reverse[(prefix, original)] = token
+    occupied: set[str] = set()
+    for e in entries:
+        reverse[(e["type"], e["original"])] = e["out"]
+        occupied.add(e["out"])
+        if e.get("kind") == "marker":
+            counters[e["type"]] = max(counters.get(e["type"], 0), e.get("index", 0))
 
-    def _allocate(prefix: str, original: str) -> str:
-        """Возвращает существующий токен для original или создаёт новый."""
-        existing = reverse.get((prefix, original))
+    labels = settings.marker_labels(language)
+    marker_set = set(settings.marker_types)
+
+    def _make_marker(ctype: str) -> tuple[str, int]:
+        """Создаёт уникальную метку, обходя коллизии с текстом и занятыми out."""
+        label = labels.get(ctype, ctype)
+        while True:
+            counters[ctype] = counters.get(ctype, 0) + 1
+            candidate = f"{settings.marker_open}{label} {counters[ctype]}{settings.marker_close}"
+            if candidate not in text and candidate not in occupied:
+                return candidate, counters[ctype]
+
+    def _allocate(canonical_type: str, original: str) -> str:
+        """Возвращает существующий out для original или создаёт новый."""
+        existing = reverse.get((canonical_type, original))
         if existing:
             return existing
-        counters[prefix] = counters.get(prefix, 0) + 1
-        new_token = f"{prefix}_{counters[prefix]}"
-        mapping[new_token] = original
-        reverse[(prefix, original)] = new_token
-        return new_token
+        if canonical_type in marker_set:
+            out, index = _make_marker(canonical_type)
+            entries.append({"out": out, "original": original,
+                            "type": canonical_type, "kind": "marker", "index": index})
+        else:
+            out = generate_surrogate(canonical_type, original, session_id, text, occupied)
+            entries.append({"out": out, "original": original,
+                            "type": canonical_type, "kind": "surrogate"})
+        occupied.add(out)
+        reverse[(canonical_type, original)] = out
+        return out
+
+    def _note_type(ctype: str) -> None:
+        if ctype not in entity_types_found:
+            entity_types_found.append(ctype)
 
     # --- Шаг 1: Natasha NER (Person + Org для русского) ---
-    natasha_spans: list[tuple[int, int, str, str]] = []  # (start, end, type, value)
+    natasha_spans: list[tuple[int, int, str, str]] = []  # (start, end, canonical, out)
 
     if language == "ru":
         doc = Doc(text)
@@ -554,13 +589,16 @@ def mask_text(
 
         for span in doc.spans:
             if span.type in ("PER", "ORG"):
-                if _is_natasha_fp(span.text):
+                s, e = _clip_natasha_span(text, span.start, span.stop)
+                if e <= s:
                     continue
-                entity_key = _ENTITY_TOKEN_MAP.get(span.type, span.type)
-                token = _allocate(entity_key, span.text)
-                natasha_spans.append((span.start, span.stop, span.type, token))
-                if span.type not in entity_types_found:
-                    entity_types_found.append(span.type)
+                span_text = text[s:e]
+                if _is_natasha_fp(span_text):
+                    continue
+                ctype = _CANONICAL_TYPE.get(span.type, span.type)
+                out = _allocate(ctype, span_text)
+                natasha_spans.append((s, e, ctype, out))
+                _note_type(ctype)
 
     # --- Шаг 2: Presidio ---
     results = _presidio_analyzer.analyze(
@@ -581,43 +619,68 @@ def mask_text(
             continue
 
         original = text[result.start:result.end]
-        entity_key = _ENTITY_TOKEN_MAP.get(result.entity_type, result.entity_type)
-        token = _allocate(entity_key, original)
-        presidio_spans.append((result.start, result.end, result.entity_type, token))
+        ctype = _CANONICAL_TYPE.get(result.entity_type, result.entity_type)
+        out = _allocate(ctype, original)
+        presidio_spans.append((result.start, result.end, ctype, out))
+        _note_type(ctype)
 
-        if result.entity_type not in entity_types_found:
-            entity_types_found.append(result.entity_type)
+    # --- Шаг 3: Сборка слева-направо + masked_spans (позиции в итоговом тексте) ---
+    all_spans = sorted(natasha_spans + presidio_spans, key=lambda x: x[0])
 
-    # --- Шаг 3: Применяем замены справа налево (сохраняем позиции) ---
-    all_spans = sorted(natasha_spans + presidio_spans, key=lambda x: x[0], reverse=True)
+    parts: list[str] = []
+    masked_spans: list[dict] = []
+    cursor = 0
+    new_pos = 0
+    for start, end, ctype, out in all_spans:
+        if start < cursor:
+            continue  # защита от перекрытий (не должно случаться после резолва)
+        segment = text[cursor:start]
+        parts.append(segment)
+        new_pos += len(segment)
+        masked_spans.append({"start": new_pos, "end": new_pos + len(out), "type": ctype})
+        parts.append(out)
+        new_pos += len(out)
+        cursor = end
+    parts.append(text[cursor:])
+    masked = "".join(parts)
 
-    masked = text
-    for start, end, _, token in all_spans:
-        masked = masked[:start] + token + masked[end:]
-
-    return masked, mapping, entity_types_found
+    return masked, entries, entity_types_found, masked_spans
 
 
 # ----------------------------------------------------------
 # Функция демаскирования
 # ----------------------------------------------------------
 
-def unmask_text(text: str, mapping: dict[str, str]) -> tuple[str, int]:
+def entries_to_out_map(entries: list[dict]) -> dict[str, str]:
+    """Строит словарь {out: original} из записей mapping."""
+    return {e["out"]: e["original"] for e in entries}
+
+
+def unmask_text(text: str, out_to_original: dict[str, str]) -> tuple[str, int]:
     """
-    Восстанавливает оригинальные значения из токенов.
+    Восстанавливает оригинальные значения из суррогатов/меток.
+
+    Однопроходный re.sub: исключает каскад (восстановленный original не
+    пересматривается) и даёт точный счётчик вхождений.
 
     Returns:
-        unmasked_text  — восстановленный текст
-        tokens_replaced — количество замен
+        unmasked_text   — восстановленный текст
+        tokens_replaced — количество фактических вхождений (не число ключей)
     """
-    result = text
+    if not out_to_original:
+        return text, 0
+
+    # Альтернатива отсортирована longest-first: длинный out матчится раньше,
+    # чтобы короткий out-префикс не «съел» начало длинного.
+    pattern = re.compile(
+        "|".join(re.escape(o) for o in sorted(out_to_original, key=len, reverse=True))
+    )
     count = 0
 
-    # Сортируем по убыванию длины токена — избегаем частичных замен
-    # (например, PERSON_10 не должен матчиться раньше PERSON_1)
-    for token, original in sorted(mapping.items(), key=lambda x: len(x[0]), reverse=True):
-        if token in result:
-            result = result.replace(token, original)
-            count += 1
+    def _repl(m: re.Match) -> str:
+        nonlocal count
+        count += 1
+        return out_to_original[m.group(0)]
 
+    result = pattern.sub(_repl, text)
     return result, count
